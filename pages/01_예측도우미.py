@@ -6,7 +6,7 @@
 """
 from core import *   # 공통 모듈 (데이터 로더, 스타일, Solar API 등)
 
-page_setup("휴가 타이밍 예측기", "🏖️")
+page_setup("휴가 타이밍 예측기", "🏖️", highlight_third_metric=False)
 
 st.markdown("## 🏖️ 휴가 타이밍 예측기 — 언제 쉬면 꿀맛일까?")
 try:
@@ -40,6 +40,10 @@ else:
 cmin, cmax = csv_date_range()
 if not cmin:
     st.warning("2025년 승하차 통계 파일을 찾을 수 없어 요일 분석·예측을 할 수 없습니다.")
+    # 파일을 나중에 올린 경우, 예전 '없음' 결과가 캐시에 남아있을 수 있다 → 캐시 비우고 재시도
+    if st.button("🔄 데이터 다시 불러오기"):
+        st.cache_data.clear()
+        st.rerun()
     # 문제 파악을 돕기 위해, 파일별 상세 진단을 보여준다
     diags = csv_diagnostic()
     if diags:
