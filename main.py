@@ -2,8 +2,8 @@
 """
 서울교통공사 역 분석 대시보드 (main.py)
 - 이 파일: 역 종합 현황 / 혼잡도 / 주변 역 지도
-- pages/00_AI분석.py: 관심역 비교 분석 + AI 도우미
-- pages/00_예측도우미.py: 휴가 요일 추천 AI
+- pages/00_AI분석기.py: 관심역 비교 분석 + AI 도우미
+- pages/01_예측도우미.py: 휴가 요일 추천 AI
 - 공통 로더·유틸·스타일은 core.py에 있습니다
 - 실행: streamlit run main.py
 """
@@ -29,9 +29,9 @@ page = st.radio("페이지",
 # 별도 페이지로 분리된 기능 바로가기
 nav1, nav2, _nav = st.columns([1.2, 1, 1.8])
 with nav1:
-    st.page_link("pages/00_AI분석.py", label="🤖 AI 분석 (관심역 비교·도우미)")
+    st.page_link("pages/00_AI분석기.py", label="🤖 AI 분석 (관심역 비교·도우미)")
 with nav2:
-    st.page_link("pages/00_예측도우미.py", label="🔮 예측 도우미")
+    st.page_link("pages/01_예측도우미.py", label="🔮 예측 도우미")
 
 # 역 목록 확보 (API 스냅샷 → 실패 시 첨부 CSV)
 with st.spinner("역 목록 로딩 중..."):
