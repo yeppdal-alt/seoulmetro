@@ -4,6 +4,8 @@
 - 모든 페이지(main.py, pages/*.py)가 함께 쓰는 데이터 로더·유틸·스타일
 - 모든 API Key는 st.secrets에서 로드 (코드에 하드코딩 금지!)
 """
+import os                              # 파일 경로 처리
+import glob                            # 폴더에서 파일 찾기
 import re                              # 문자열 처리(정규식)
 import math                            # 두 역 사이 거리 계산(하버사인)
 import datetime as dt                  # 날짜 계산
@@ -490,33 +492,45 @@ def load_riders_raw(api_key: str, pasng_ymd: str = "", stn_nm: str = "",
 # 1-b) 2025년 승하차 보완 데이터 (첨부 CSV)
 #      서울교통공사_역별 일별 시간대별 승하차인원 (2025-01-01 ~ 2025-12-31)
 # ─────────────────────────────────────────────
-# 압축본(.xz, 약 6.8MB)을 우선 사용하고, 없으면 원본 CSV(25MB)를 읽는다
+# 2025년 승하차 통계 CSV: main.py(core.py)와 같은 폴더에서 자동으로 찾는다
 CSV_FILE = "서울교통공사_역별 일별 시간대별 승하차인원_20251231.csv"
-CSV_CANDIDATES = (
-    (CSV_FILE + ".xz", "utf-8"),   # 압축본 (utf-8로 재저장됨)
-    (CSV_FILE, "cp949"),           # 원본
-    (CSV_FILE, "utf-8-sig"),
-)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))   # core.py가 있는 폴더
 
 
-@st.cache_data(show_spinner=False)
+def find_csv_files():
+    """폴더 안의 모든 CSV류 파일(.csv, .csv.xz, .csv.gz)을 찾는다.
+    파일명이 조금 달라도 내용(수송일자 컬럼)으로 판별하므로 이름에 구애받지 않는다.
+    압축본(.xz)이 있으면 우선 시도."""
+    files = (glob.glob(os.path.join(BASE_DIR, "*.csv"))
+             + glob.glob(os.path.join(BASE_DIR, "*.csv.xz"))
+             + glob.glob(os.path.join(BASE_DIR, "*.csv.gz")))
+    files = list(dict.fromkeys(files))                    # 중복 제거
+    files.sort(key=lambda f: 0 if f.endswith(".xz") else 1)  # xz(작은 파일) 우선
+    return files
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def load_csv_raw():
-    """2025년 CSV를 읽어 원본 그대로 반환 (파일이 없으면 None).
-    pandas가 .xz 압축을 자동으로 풀어서 읽어준다."""
-    df = None
-    for path, enc in CSV_CANDIDATES:
-        try:
-            df = pd.read_csv(path, encoding=enc)
-            break
-        except (FileNotFoundError, UnicodeDecodeError):
-            continue
-        except Exception:
-            continue
-    if df is None or "수송일자" not in df.columns:
-        return None
-    df = df.dropna(subset=["수송일자"])            # 파일 끝의 빈 행 제거
-    df["수송일자"] = df["수송일자"].astype(str).str.replace("-", "").str[:8]
-    return df
+    """2025년 CSV를 읽어 원본 그대로 반환 (없으면 None).
+    - 폴더 안 CSV들을 순서대로 열어 '수송일자' 컬럼이 있는 파일을 채택
+    - 인코딩(utf-8/cp949 등)도 자동으로 맞춘다"""
+    for path in find_csv_files():
+        for enc in ("utf-8", "cp949", "utf-8-sig", "euc-kr"):
+            try:
+                df = pd.read_csv(path, encoding=enc)
+            except (UnicodeDecodeError, UnicodeError):
+                continue          # 인코딩이 안 맞음 → 다음 인코딩 시도
+            except FileNotFoundError:
+                break             # 파일이 사라짐 → 다음 파일
+            except Exception:
+                continue
+            if "수송일자" in df.columns:                  # 올바른 파일!
+                df = df.dropna(subset=["수송일자"])        # 끝의 빈 행 제거
+                df["수송일자"] = (df["수송일자"].astype(str)
+                                 .str.replace("-", "").str[:8])
+                return df
+            # 읽히긴 했지만 헤더가 깨졌거나 다른 CSV → 다음 인코딩/파일 시도
+    return None
 
 
 @st.cache_data(show_spinner=False)
