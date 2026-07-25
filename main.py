@@ -449,23 +449,28 @@ def load_riders_raw(api_key: str, pasng_ymd: str = "", stn_nm: str = "",
 # 1-b) 2025년 승하차 보완 데이터 (첨부 CSV)
 #      서울교통공사_역별 일별 시간대별 승하차인원 (2025-01-01 ~ 2025-12-31)
 # ─────────────────────────────────────────────
+# 압축본(.xz, 약 6.8MB)을 우선 사용하고, 없으면 원본 CSV(25MB)를 읽는다
 CSV_FILE = "서울교통공사_역별 일별 시간대별 승하차인원_20251231.csv"
+CSV_CANDIDATES = (
+    (CSV_FILE + ".xz", "utf-8"),   # 압축본 (utf-8로 재저장됨)
+    (CSV_FILE, "cp949"),           # 원본
+    (CSV_FILE, "utf-8-sig"),
+)
 
 
 @st.cache_data(show_spinner=False)
 def load_csv_raw():
-    """2025년 CSV를 읽어 원본 그대로 반환 (파일이 없으면 None)."""
+    """2025년 CSV를 읽어 원본 그대로 반환 (파일이 없으면 None).
+    pandas가 .xz 압축을 자동으로 풀어서 읽어준다."""
     df = None
-    for enc in ("cp949", "utf-8-sig", "euc-kr"):
+    for path, enc in CSV_CANDIDATES:
         try:
-            df = pd.read_csv(CSV_FILE, encoding=enc)
+            df = pd.read_csv(path, encoding=enc)
             break
-        except UnicodeDecodeError:
+        except (FileNotFoundError, UnicodeDecodeError):
             continue
-        except FileNotFoundError:
-            return None
         except Exception:
-            return None
+            continue
     if df is None or "수송일자" not in df.columns:
         return None
     df = df.dropna(subset=["수송일자"])            # 파일 끝의 빈 행 제거
