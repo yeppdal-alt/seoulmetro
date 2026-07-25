@@ -187,24 +187,133 @@ def fetch_seoul_with_fallback(api_key, service, fmt, station=None):
 
 
 # ─────────────────────────────────────────────
-# 1) 역별 승하차인원 (CardSubwayStatsNew, JSON)
+# 1) 역별 승하차인원 (공공데이터포털 B553766/psgr/getStnPsgr)
 # ─────────────────────────────────────────────
+RIDERS_ENDPOINT = "https://apis.data.go.kr/B553766/psgr/getStnPsgr"
+
+
+def _deep_get(obj, key):
+    """중첩 dict/list에서 key 값을 재귀 탐색."""
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            if str(k).lower() == key.lower():
+                return v
+            r = _deep_get(v, key)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for it in obj:
+            r = _deep_get(it, key)
+            if r is not None:
+                return r
+    return None
+
+
+def _find_records(obj):
+    """응답 구조가 어떻든 dict 리스트(레코드 목록)를 재귀 탐색."""
+    if isinstance(obj, list):
+        if obj and isinstance(obj[0], dict):
+            return obj
+        for it in obj:
+            r = _find_records(it)
+            if r:
+                return r
+    elif isinstance(obj, dict):
+        for k in ("item", "items", "data", "row", "list"):
+            if k in obj:
+                r = _find_records(obj[k])
+                if r:
+                    return r
+        for v in obj.values():
+            r = _find_records(v)
+            if r:
+                return r
+    return None
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_ridership(api_key: str, date_str: str):
-    rows, err = fetch_seoul(api_key, "CardSubwayStatsNew", "json", 1, 1000, (date_str,))
-    if err:
-        return pd.DataFrame(), err
-    if not rows:
-        return pd.DataFrame(), None
-    df = pd.DataFrame(rows)
-    c_line = find_col(df.columns, ["SBWY_ROUT_LN_NM", "LINE_NUM", "LINE"])
-    c_stn = find_col(df.columns, ["SBWY_STNS_NM", "SUB_STA_NM", "STNS_NM", "STA_NM"])
-    c_ride = find_col(df.columns, ["GTON", "RIDE"])
-    c_alight = find_col(df.columns, ["GTOFF", "ALIGHT"])
-    if not all([c_line, c_stn, c_ride, c_alight]):
-        return pd.DataFrame(), "승하차 데이터 컬럼 구조를 인식할 수 없습니다."
+def _fetch_riders_page(api_key: str, page: int, num_rows: int, date_str: str = ""):
+    """반환: (rows|None, err|None, total_count)"""
+    if not api_key:
+        return None, "API 키가 Secrets에 설정되지 않았습니다.", 0
+    params = {"serviceKey": api_key, "pageNo": page,
+              "numOfRows": num_rows, "dataType": "JSON"}
+    if date_str:
+        params["dt"] = date_str
+    try:
+        r = requests.get(RIDERS_ENDPOINT, params=params, timeout=TIMEOUT)
+    except requests.RequestException:
+        return None, "API 호출 실패 (네트워크 또는 서버 오류)", 0
+
+    # JSON 시도
+    try:
+        data = r.json()
+        code = str(_deep_get(data, "resultCode") or "")
+        if code and code not in ("00", "0", "INFO-000", "NORMAL_SERVICE"):
+            msg = _deep_get(data, "resultMsg") or ""
+            return None, f"API 오류 [{code}]: {msg}", 0
+        rows = _find_records(data) or []
+        try:
+            total = int(_deep_get(data, "totalCount") or len(rows))
+        except (TypeError, ValueError):
+            total = len(rows)
+        return rows, None, total
+    except ValueError:
+        pass
+
+    # XML 시도 (게이트웨이 인증 오류 포함)
+    try:
+        root = ET.fromstring(r.content)
+    except ET.ParseError:
+        return None, "응답 파싱 실패: 인증키(Decoding 키 사용 여부)를 확인하세요.", 0
+    auth = root.find(".//returnAuthMsg")
+    if auth is not None and auth.text:
+        return None, (f"인증 오류: {auth.text.strip()} → 공공데이터포털 인증키가 맞는지, "
+                      "활용신청이 승인되었는지 확인하세요."), 0
+    rc = root.find(".//resultCode")
+    if rc is not None and rc.text and rc.text.strip() not in ("00", "0"):
+        rm = root.find(".//resultMsg")
+        msg = rm.text.strip() if rm is not None and rm.text else ""
+        return None, f"API 오류 [{rc.text.strip()}]: {msg}", 0
+    items = [{c.tag: (c.text or "").strip() for c in it} for it in root.iter("item")]
+    if not items:
+        items = [{c.tag: (c.text or "").strip() for c in it} for it in root.iter("row")]
+    tc = root.find(".//totalCount")
+    total = int(tc.text) if tc is not None and tc.text and tc.text.strip().isdigit() else len(items)
+    return items, None, total
+
+
+def _standardize_riders(df: pd.DataFrame):
+    """API 응답 컬럼명을 표준(날짜/호선/역명/승차/하차/합계)으로 변환."""
+    cols = list(df.columns)
+    c_date = find_col(cols, ["useYmd", "use_ymd", "sttusYmd", "ymd", "opDate", "일자", "date"])
+    if not c_date:
+        c_date = find_col([c for c in cols if "reg" not in str(c).lower()], ["dt"])
+    c_stn = (find_col(cols, ["stnNm", "staNm", "stationNm", "역명", "stns_nm", "sub_sta_nm"])
+             or find_col(cols, ["stn", "sta"]))
+    c_line = find_col(cols, ["lineNm", "line", "호선", "rout"])
+    c_ride = find_col(cols, ["ride", "gton", "승차"])
+    c_alight = find_col(cols, ["algh", "alight", "gtoff", "하차"])
+    if not c_stn:
+        return pd.DataFrame(), "역명 컬럼 인식 실패. 응답 컬럼: " + ", ".join(map(str, cols))
+    if not (c_ride and c_alight):
+        # 이름으로 못 찾으면: 코드/날짜성 컬럼을 제외한 숫자 컬럼 2개를 승차/하차로 간주
+        nums = []
+        for c in numeric_cols(df):
+            name = str(c).lower()
+            if c in (c_date,) or "cd" in name or "no" in name:
+                continue
+            v = to_num(df[c])
+            if v.max() is not None and pd.notna(v.max()) and v.max() > 5_000_000:
+                continue  # 날짜(YYYYMMDD) 등 제외
+            nums.append(c)
+        if len(nums) >= 2:
+            c_ride, c_alight = nums[0], nums[1]
+        else:
+            return pd.DataFrame(), "승하차 인원 컬럼 인식 실패. 응답 컬럼: " + ", ".join(map(str, cols))
     out = pd.DataFrame({
-        "호선": df[c_line].astype(str),
+        "날짜": (df[c_date].astype(str).str.replace("-", "").str[:8] if c_date else ""),
+        "호선": (df[c_line].astype(str) if c_line else "전체"),
         "역명": df[c_stn].astype(str),
         "승차": to_num(df[c_ride]).fillna(0).astype(int),
         "하차": to_num(df[c_alight]).fillna(0).astype(int),
@@ -214,17 +323,77 @@ def load_ridership(api_key: str, date_str: str):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def load_riders_raw(api_key: str, date_str: str = "", max_pages: int = 3):
+    """페이지네이션 포함 원본 수집 → 표준 DataFrame. 반환 (df, err)."""
+    all_rows = []
+    for page in range(1, max_pages + 1):
+        rows, err, total = _fetch_riders_page(api_key, page, 1000, date_str)
+        if err:
+            if page == 1:
+                return pd.DataFrame(), err
+            break
+        if not rows:
+            break
+        all_rows.extend(rows)
+        if len(all_rows) >= total:
+            break
+    if not all_rows:
+        return pd.DataFrame(), None
+    return _standardize_riders(pd.DataFrame(all_rows))
+
+
+def load_ridership(api_key: str, date_str: str):
+    """선택 날짜 기준 데이터. 반환 (df, err, note)."""
+    df, err = load_riders_raw(api_key, date_str)  # 서버측 날짜 필터 시도
+    if err:
+        return pd.DataFrame(), err, None
+    note = None
+    if df.empty:
+        df, err = load_riders_raw(api_key, "")  # 날짜 파라미터 미지원 대비
+        if err:
+            return pd.DataFrame(), err, None
+    if df.empty:
+        return df, None, None
+    if "날짜" in df.columns and df["날짜"].astype(bool).any():
+        dates = df["날짜"]
+        if (dates == date_str).any():
+            df = df[dates == date_str]
+        else:
+            latest = dates[dates != ""].max()
+            df = df[dates == latest]
+            if latest and latest != date_str:
+                note = f"선택한 날짜의 데이터가 없어 최신 제공일({latest}) 기준으로 표시합니다."
+    return df.reset_index(drop=True), None, note
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_trend(api_key: str, base_date: dt.date, station: str, days: int = TREND_DAYS):
+    # 1) 전체 데이터에 여러 날짜가 포함된 경우: 클라이언트에서 집계
+    full, err = load_riders_raw(api_key, "")
+    if not err and full is not None and not full.empty and full["날짜"].nunique() > 1:
+        sub = full[full["역명"].apply(lambda x: station_match(x, station))]
+        if not sub.empty:
+            g = (sub.groupby("날짜")[["승차", "하차"]].sum().reset_index()
+                 .sort_values("날짜").tail(days))
+            g["날짜"] = pd.to_datetime(g["날짜"], format="%Y%m%d", errors="coerce")
+            return g.dropna(subset=["날짜"])
+    # 2) 날짜별 개별 조회 (서버측 dt 필터 지원 시)
     recs = []
     for i in range(days):
         d = base_date - dt.timedelta(days=days - 1 - i)
-        df, err = load_ridership(api_key, d.strftime("%Y%m%d"))
-        if err or df.empty:
+        ds = d.strftime("%Y%m%d")
+        df, e = load_riders_raw(api_key, ds)
+        if e or df is None or df.empty:
             continue
+        if "날짜" in df.columns and df["날짜"].nunique() > 1:
+            df = df[df["날짜"] == ds]
+            if df.empty:
+                continue
         sub = df[df["역명"].apply(lambda x: station_match(x, station))]
         if sub.empty:
             continue
-        recs.append({"날짜": d, "승차": int(sub["승차"].sum()), "하차": int(sub["하차"].sum())})
+        recs.append({"날짜": d, "승차": int(sub["승차"].sum()),
+                     "하차": int(sub["하차"].sum())})
     return pd.DataFrame(recs)
 
 
@@ -339,7 +508,7 @@ with st.sidebar:
     date_str = base_date.strftime("%Y%m%d")
 
     with st.spinner("역 목록 로딩 중..."):
-        rid_df, rid_err = load_ridership(keys["riders"], date_str)
+        rid_df, rid_err, rid_note = load_ridership(keys["riders"], date_str)
 
     if not rid_df.empty:
         stations = sorted(rid_df["역명"].unique().tolist())
@@ -358,7 +527,7 @@ with st.sidebar:
 
     with st.expander("🔑 API 키 설정 상태"):
         labels = {
-            "riders": "승하차 (RIDERS_API_KEY)",
+            "riders": "승하차 (RIDERS_API_KEY · 공공데이터포털)",
             "transfer": "환승 (TRANSFER_API_KEY)",
             "building": "건축 (BUILDING_API_KEY)",
             "busy": "혼잡도 (BUSY_API_KEY)",
@@ -373,6 +542,8 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 st.title(f"📊 {station} 역 종합 현황")
 st.caption(f"기준일: {base_date.strftime('%Y-%m-%d')} · 출처: 서울열린데이터광장 / 공공데이터포털")
+if rid_note:
+    st.info(rid_note)
 
 sel = (rid_df[rid_df["역명"].apply(lambda x: station_match(x, station))]
        if not rid_df.empty else pd.DataFrame())
