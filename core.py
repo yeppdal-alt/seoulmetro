@@ -62,7 +62,7 @@ def _apply_css():
         .hero-title span {font-weight: 400; color: rgba(255,255,255,0.85);}
         .hero-sub {margin-top: 8px; font-size: 0.92rem; color: rgba(255,255,255,0.82);}
 
-        /* KPI 카드: 흰색 큰 라운드, 첫 번째 카드는 블랙으로 포인트 */
+        /* KPI 카드: 모두 동일한 흰색 큰 라운드 카드 */
         [data-testid="stMetric"] {
             background: #FFFFFF; border: none;
             border-radius: 24px; padding: 18px 22px;
@@ -72,15 +72,9 @@ def _apply_css():
         [data-testid="stMetric"]:hover {transform: translateY(-3px);}
         [data-testid="stMetricLabel"] {font-size: 0.85rem; color: #64748B;}
         [data-testid="stMetricValue"] {color: #0F172A; font-weight: 800;}
-        [data-testid="stHorizontalBlock"] > div:first-child [data-testid="stMetric"] {
-            background: #0F172A;
-            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.28);
-        }
-        [data-testid="stHorizontalBlock"] > div:first-child [data-testid="stMetricLabel"] {
-            color: rgba(255,255,255,0.65);
-        }
-        [data-testid="stHorizontalBlock"] > div:first-child [data-testid="stMetricValue"] {
-            color: #FFFFFF;
+        /* 세 번째 카드(총 이용객)의 숫자는 블루로 하이라이트 */
+        [data-testid="stHorizontalBlock"] > div:nth-child(3) [data-testid="stMetricValue"] {
+            color: #2F6BFF;
         }
 
         /* 탭: 흰 알약 칩 → 선택 시 블루 채움 */
