@@ -33,7 +33,7 @@ st.set_page_config(
     initial_sidebar_state="collapsed",  # 사이드바 없이 한 화면으로 구성
 )
 
-# ── 화면을 세련되게 꾸미는 CSS (색·글꼴·카드 모양 등) ──
+# ── 화면을 세련되게 꾸미는 CSS (소프트 스카이블루 톤, 흰색 라운드 카드) ──
 st.markdown(
     """
     <style>
@@ -41,56 +41,95 @@ st.markdown(
     @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
     html, body, [class*="css"] {font-family: 'Pretendard', sans-serif;}
 
-    .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 1200px;}
-
-    /* 상단 히어로(제목) 배너 */
-    .hero {
-        background: linear-gradient(120deg, #0052A4 0%, #1C83E1 55%, #00A84D 120%);
-        border-radius: 18px; padding: 26px 30px; margin-bottom: 6px;
-        color: #fff; box-shadow: 0 8px 24px rgba(0, 82, 164, 0.25);
+    /* 전체 배경: 아주 연한 하늘색 그라데이션 */
+    .stApp {
+        background: linear-gradient(180deg, #EAF3FF 0%, #F5FAFF 45%, #F2F8FF 100%);
     }
-    .hero-title {font-size: 1.9rem; font-weight: 800; letter-spacing: -0.5px;}
-    .hero-title span {font-weight: 500; opacity: 0.9;}
-    .hero-sub {margin-top: 6px; font-size: 0.9rem; opacity: 0.85;}
+    /* 스트림릿 기본 상단바를 투명하게 → 배경과 자연스럽게 연결 */
+    [data-testid="stHeader"] {background: transparent;}
 
-    /* KPI 지표 카드 */
+    /* 상단 여백을 넉넉히 → 제목 글자가 짤리지 않게 */
+    .block-container {padding-top: 3rem; padding-bottom: 2.5rem; max-width: 1150px;}
+
+    /* 제목 계열 글자색: 짙은 네이비 */
+    h1, h2, h3 {color: #0F3D6E !important; letter-spacing: -0.4px;}
+
+    /* 상단 히어로 배너: 밝은 하늘색 카드 + 어두운 글자 */
+    .hero {
+        background: linear-gradient(120deg, #CFE6FF 0%, #E4F0FF 55%, #F2F8FF 100%);
+        border: 1px solid #FFFFFF;
+        border-radius: 24px; padding: 26px 30px; margin: 6px 0 10px 0;
+        box-shadow: 0 12px 30px rgba(59, 157, 248, 0.16);
+    }
+    .hero-title {font-size: 1.9rem; font-weight: 800; color: #0F3D6E; letter-spacing: -0.5px;}
+    .hero-title span {font-weight: 500; color: #3D6C9E;}
+    .hero-sub {margin-top: 6px; font-size: 0.9rem; color: #5B7FA6;}
+
+    /* KPI 지표 카드: 흰색 + 큰 라운드 + 은은한 그림자 */
     [data-testid="stMetric"] {
-        background: linear-gradient(180deg, rgba(28,131,225,0.08), rgba(28,131,225,0.02));
-        border: 1px solid rgba(28, 131, 225, 0.18);
-        border-radius: 14px; padding: 14px 18px;
-        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+        background: #FFFFFF; border: none;
+        border-radius: 20px; padding: 16px 20px;
+        box-shadow: 0 8px 22px rgba(59, 157, 248, 0.10);
         transition: transform .15s ease;
     }
     [data-testid="stMetric"]:hover {transform: translateY(-2px);}
-    [data-testid="stMetricLabel"] {font-size: 0.85rem; opacity: 0.8;}
+    [data-testid="stMetricLabel"] {font-size: 0.85rem; color: #5B7FA6;}
+    [data-testid="stMetricValue"] {color: #0F3D6E;}
 
-    /* 탭을 알약(pill) 모양으로 */
-    .stTabs [data-baseweb="tab-list"] {gap: 6px; flex-wrap: wrap;}
+    /* 탭: 흰색 알약 → 선택되면 하늘색 채움 */
+    .stTabs [data-baseweb="tab-list"] {gap: 8px; flex-wrap: wrap;}
     .stTabs [data-baseweb="tab"] {
-        border-radius: 999px; padding: 8px 16px;
-        background: rgba(28, 131, 225, 0.07);
+        border-radius: 999px; padding: 8px 18px;
+        background: #FFFFFF;
+        box-shadow: 0 2px 10px rgba(59, 157, 248, 0.08);
     }
     .stTabs [aria-selected="true"] {
-        background: #1C83E1 !important; color: #fff !important;
+        background: #3B9DF8 !important; color: #FFFFFF !important;
     }
 
-    /* 채팅 말풍선 */
+    /* 그래프도 흰색 라운드 카드 위에 얹기 */
+    [data-testid="stPlotlyChart"] {
+        background: #FFFFFF; border-radius: 20px; padding: 12px;
+        box-shadow: 0 8px 22px rgba(59, 157, 248, 0.10);
+    }
+
+    /* 입력창·선택창: 둥근 모서리 + 흰 배경 */
+    [data-testid="stTextInput"] input, [data-testid="stDateInput"] input {
+        border-radius: 999px; background: #FFFFFF;
+    }
+    [data-baseweb="select"] > div {border-radius: 999px; background: #FFFFFF;}
+
+    /* 버튼: 하늘색 알약 */
+    .stButton > button {
+        border-radius: 999px; border: none;
+        background: #3B9DF8; color: #FFFFFF; padding: 8px 22px;
+        box-shadow: 0 6px 16px rgba(59, 157, 248, 0.28);
+    }
+    .stButton > button:hover {background: #2F8BE0; color: #FFFFFF;}
+
+    /* 펼침 메뉴(expander)·채팅 말풍선·표: 흰색 라운드 카드 */
+    [data-testid="stExpander"] {
+        background: #FFFFFF; border: none; border-radius: 18px;
+        box-shadow: 0 4px 14px rgba(59, 157, 248, 0.08);
+    }
     [data-testid="stChatMessage"] {
-        border-radius: 16px; padding: 4px 10px;
-        background: rgba(28, 131, 225, 0.04);
-        margin-bottom: 4px;
+        background: #FFFFFF; border-radius: 18px; padding: 8px 14px;
+        box-shadow: 0 4px 14px rgba(59, 157, 248, 0.08);
+        margin-bottom: 6px;
+    }
+    [data-testid="stDataFrame"] {
+        background: #FFFFFF; border-radius: 16px; padding: 6px;
+        box-shadow: 0 4px 14px rgba(59, 157, 248, 0.08);
     }
 
-    /* 사이드바 배경 톤 */
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, rgba(0,82,164,0.05), transparent 40%);
-    }
+    /* 안내 박스도 라운드하게 */
+    [data-testid="stAlert"] {border-radius: 16px;}
 
     /* 모바일(좁은 화면) 대응 */
     @media (max-width: 640px) {
         [data-testid="stMetricValue"] {font-size: 1.25rem;}
         .hero-title {font-size: 1.3rem;}
-        .block-container {padding-left: 0.8rem; padding-right: 0.8rem;}
+        .block-container {padding-left: 0.8rem; padding-right: 0.8rem; padding-top: 2.6rem;}
     }
     </style>
     """,
@@ -699,9 +738,9 @@ with tab_ride:
                       .sort_values("시간"))
             fig = go.Figure()
             fig.add_trace(go.Bar(x=hourly["시간"], y=hourly["승차"], name="승차",
-                                 marker_color="#1C83E1"))
+                                 marker_color="#3B9DF8"))
             fig.add_trace(go.Bar(x=hourly["시간"], y=hourly["하차"], name="하차",
-                                 marker_color="#FF6B6B"))
+                                 marker_color="#FF7E9D"))
             fig.update_layout(template=PLOTLY_TEMPLATE, barmode="group", height=380,
                               xaxis_title="시간대(시)", yaxis_title="인원(명)",
                               margin=dict(t=20, b=10),
@@ -716,7 +755,7 @@ with tab_ride:
                        var_name="구분", value_name="인원"))
             fig = px.bar(m, x="호선", y="인원", color="구분", barmode="group",
                          template=PLOTLY_TEMPLATE,
-                         color_discrete_map={"승차": "#1C83E1", "하차": "#FF6B6B"})
+                         color_discrete_map={"승차": "#3B9DF8", "하차": "#FF7E9D"})
             fig.update_layout(height=360, margin=dict(t=20, b=10),
                               legend=dict(orientation="h", y=1.1))
             st.plotly_chart(fig, use_container_width=True)
@@ -739,10 +778,10 @@ with tab_ride:
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=trend["날짜"], y=trend["승차"], name="승차",
                                          mode="lines+markers",
-                                         line=dict(color="#1C83E1", width=3)))
+                                         line=dict(color="#3B9DF8", width=3)))
                 fig.add_trace(go.Scatter(x=trend["날짜"], y=trend["하차"], name="하차",
                                          mode="lines+markers",
-                                         line=dict(color="#FF6B6B", width=3)))
+                                         line=dict(color="#FF7E9D", width=3)))
                 fig.update_layout(template=PLOTLY_TEMPLATE, height=360,
                                   margin=dict(t=20, b=10),
                                   legend=dict(orientation="h", y=1.1))
@@ -763,7 +802,7 @@ with tab_ride:
         fig = px.bar(top, x="합계", y="역명", orientation="h", color="선택",
                      template=PLOTLY_TEMPLATE,
                      labels={"합계": "총 이용객(명)"},
-                     color_discrete_map={"선택 역": "#E6186C", "기타": "#B0C4DE"})
+                     color_discrete_map={"선택 역": "#FF5C8A", "기타": "#C9DCF0"})
         fig.update_layout(height=560, yaxis=dict(autorange="reversed"),
                           margin=dict(t=20, b=10), showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
@@ -806,7 +845,7 @@ with tab_trans:
             fig = px.bar(rank, x="_합계", y=c_stn, orientation="h", color="선택",
                          template=PLOTLY_TEMPLATE,
                          labels={"_합계": "환승 인원(명)", c_stn: "역명"},
-                         color_discrete_map={"선택 역": "#E6186C", "기타": "#B0C4DE"})
+                         color_discrete_map={"선택 역": "#FF5C8A", "기타": "#C9DCF0"})
             fig.update_layout(height=480, yaxis=dict(autorange="reversed"),
                               margin=dict(t=20, b=10), showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
@@ -911,7 +950,7 @@ with tab_elev:
                     cnt.columns = ["상태", "대수"]
                     fig = px.bar(cnt, x="상태", y="대수", color="상태",
                                  template=PLOTLY_TEMPLATE,
-                                 color_discrete_sequence=["#00A84D", "#FF6B6B", "#B0C4DE"])
+                                 color_discrete_sequence=["#00A84D", "#FF7E9D", "#C9DCF0"])
                     fig.update_layout(height=340, margin=dict(t=20, b=10),
                                       showlegend=False)
                     st.plotly_chart(fig, use_container_width=True)
