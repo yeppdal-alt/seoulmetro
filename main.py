@@ -187,9 +187,9 @@ def fetch_seoul_with_fallback(api_key, service, fmt, station=None):
 
 
 # ─────────────────────────────────────────────
-# 1) 역별 승하차인원 (공공데이터포털 B553766/psgr/getStnPsgr)
+# 1) 역별 승하차인원 (공공데이터포털 B553766/psgr/)
 # ─────────────────────────────────────────────
-RIDERS_ENDPOINT = "https://apis.data.go.kr/B553766/psgr/getStnPsgr"
+RIDERS_ENDPOINT = "https://apis.data.go.kr/B553766/psgr/"
 
 
 def _deep_get(obj, key):
