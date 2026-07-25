@@ -29,7 +29,7 @@ SOLAR_MODEL = "solar-open2"            # 모델 이름은 글자 그대로 사�
 def page_setup(title="서울교통공사 역 분석 대시보드", icon="🚇"):
     """각 페이지 첫머리에서 호출: 페이지 설정 + 공통 CSS 적용."""
     st.set_page_config(page_title=title, page_icon=icon, layout="wide",
-                       initial_sidebar_state="collapsed")
+                       initial_sidebar_state="auto")  # 사이드바에 페이지 목록 표시
     _apply_css()
 
 
