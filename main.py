@@ -728,12 +728,13 @@ MIN_DAY = (dt.datetime.strptime(_cmin, "%Y%m%d").date() if _cmin else API_MIN)
 
 st.markdown("## 🚇 서울교통공사 역 분석 대시보드")
 
-# ── 1) 역 검색 (최상단) ──
-col_search, col_select = st.columns([1, 1.6])
+# ── 페이지 선택: 역 종합 현황 / 관심역 비교 분석 ──
+page = st.radio("페이지", ["📊 역 종합 현황", "⚖️ 관심역 비교 분석"],
+                horizontal=True, label_visibility="collapsed")
+
+# 역 목록 확보: API 스냅샷 → 실패하면 첨부 CSV에서
 with st.spinner("역 목록 로딩 중..."):
     rid_df, rid_err = load_station_list(keys["riders"], MAX_DAY.strftime("%Y%m%d"))
-
-# 역 목록: API 스냅샷 → 실패하면 첨부 CSV에서 확보
 stations = []
 if not rid_df.empty:
     stations = sorted(rid_df["역명"].unique().tolist())
@@ -742,6 +743,202 @@ else:
     if _csv_raw is not None and "역명" in _csv_raw.columns:
         stations = sorted(_csv_raw["역명"].astype(str).unique().tolist())
 
+
+def select_period(prefix: str = "main"):
+    """일별/월별/기간 설정 위젯을 그리고 (mode, date_list, period_label)을 돌려준다."""
+    mode = st.radio("조회 방식", ["일별", "월별", "기간 설정"],
+                    horizontal=True, key=f"{prefix}_mode")
+    date_list = []          # 조회할 날짜들(dt.date 리스트)
+    period_label = ""       # 화면에 보여줄 기간 문구
+
+    if mode == "일별":
+        d = st.date_input("날짜", value=MAX_DAY, min_value=MIN_DAY,
+                          max_value=MAX_DAY, key=f"{prefix}_day")
+        date_list = [d]
+        period_label = d.strftime("%Y-%m-%d")
+
+    elif mode == "월별":
+        # 2025-01부터 이번 달까지 모두 선택 가능 (최신 달이 먼저 보이게)
+        months = []
+        _m = MAX_DAY.replace(day=1)
+        _stop = MIN_DAY.replace(day=1)
+        while _m >= _stop:
+            months.append(_m.strftime("%Y-%m"))
+            _m = (_m - dt.timedelta(days=1)).replace(day=1)
+        month_sel = st.selectbox("월 선택", months, key=f"{prefix}_month")
+        y, m = map(int, month_sel.split("-"))
+        d0 = dt.date(y, m, 1)
+        d1 = (dt.date(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
+              - dt.timedelta(days=1))                      # 그 달의 마지막 날
+        s, e = max(d0, MIN_DAY), min(d1, MAX_DAY)          # 제공 범위와 교집합
+        if s <= e:
+            date_list = [s + dt.timedelta(days=i) for i in range((e - s).days + 1)]
+        period_label = month_sel
+
+    else:  # 기간 설정
+        rng = st.date_input("기간 (시작 ~ 종료)",
+                            value=(max(MIN_DAY, MAX_DAY - dt.timedelta(days=6)), MAX_DAY),
+                            min_value=MIN_DAY, max_value=MAX_DAY, key=f"{prefix}_range")
+        # 날짜를 고르는 중에는 값이 1개만 들어올 수 있어 안전하게 처리
+        if isinstance(rng, (tuple, list)):
+            if len(rng) == 2:
+                s, e = rng
+            elif len(rng) == 1:
+                s = e = rng[0]
+            else:
+                s = e = MAX_DAY
+        else:
+            s = e = rng
+        date_list = [s + dt.timedelta(days=i) for i in range((e - s).days + 1)]
+        period_label = f"{s.strftime('%Y-%m-%d')} ~ {e.strftime('%Y-%m-%d')}"
+
+    st.caption("ℹ️ **2025년 데이터**는 첨부된 통계 파일에서, **최근 일주일**은 실시간 API에서 조회합니다. "
+               "2026년 중 일주일 이전 날짜는 두 데이터의 제공 범위 밖이라 조회되지 않아요.")
+    return mode, date_list, period_label
+
+
+# ═════════════════════════════════════════════
+# 페이지 2: 관심역 비교 분석 (3곳까지 나란히 비교)
+# ═════════════════════════════════════════════
+if page == "⚖️ 관심역 비교 분석":
+    st.markdown(
+        """
+        <div class="hero">
+          <div class="hero-title">⚖️ 관심역 비교 분석</div>
+          <div class="hero-sub">관심 있는 역을 최대 3곳까지 골라 승하차·시간대 패턴·혼잡도를 나란히 비교합니다</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # 1) 관심역 선택 (최대 3곳)
+    default_fav = [s for s in ("강남", "잠실", "홍대입구") if s in stations][:3] or stations[:3]
+    fav = st.multiselect("관심역 선택 (최대 3곳)", stations, default=default_fav,
+                         max_selections=3, key="fav_stations")
+
+    # 2) 조회 기간 선택 (종합 현황과 같은 방식)
+    cmp_mode, cmp_dates, cmp_label = select_period("cmp")
+
+    if not fav:
+        st.info("비교할 역을 1곳 이상 선택해 주세요.")
+        st.stop()
+    if not cmp_dates:
+        st.warning("조회 가능한 날짜가 없습니다. 다른 기간을 선택해 주세요.")
+        st.stop()
+
+    # 3) 관심역별 승하차 데이터 수집
+    cmp_tuple = tuple(d.strftime("%Y%m%d") for d in cmp_dates)
+    fav_data = {}
+    with st.spinner("관심역 데이터 로딩 중..."):
+        for s_name in fav:
+            df_s, e_s, _ = load_ridership_period(keys["riders"], cmp_tuple, s_name)
+            fav_data[s_name] = df_s if e_s is None else pd.DataFrame()
+    loaded = {k: v for k, v in fav_data.items() if v is not None and not v.empty}
+
+    # KPI: 역별 총 이용객
+    kpi_cols = st.columns(max(len(fav), 1))
+    for i, s_name in enumerate(fav):
+        df_s = fav_data.get(s_name)
+        total = int(df_s["합계"].sum()) if df_s is not None and not df_s.empty else 0
+        kpi_cols[i].metric(f"🚉 {s_name}", f"{total:,}명" if total else "데이터 없음",
+                           help=f"조회 기간({cmp_label}) 총 이용객")
+
+    if not loaded:
+        st.warning("선택한 기간의 승하차 데이터를 불러오지 못했습니다.")
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("승하차 인원 비교")
+            rows = []
+            for s_name, df_s in loaded.items():
+                rows.append({"역": s_name, "구분": "승차", "인원": int(df_s["승차"].sum())})
+                rows.append({"역": s_name, "구분": "하차", "인원": int(df_s["하차"].sum())})
+            comp = pd.DataFrame(rows)
+            fig = px.bar(comp, x="역", y="인원", color="구분", barmode="group",
+                         template=PLOTLY_TEMPLATE,
+                         color_discrete_map={"승차": "#3B9DF8", "하차": "#FF7E9D"})
+            fig.update_layout(height=380, margin=dict(t=20, b=10),
+                              legend=dict(orientation="h", y=1.1))
+            st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            st.subheader("시간대별 이용 패턴 비교")
+            hr_frames = []
+            for s_name, df_s in loaded.items():
+                if "시간" in df_s.columns and df_s["시간"].astype(bool).any():
+                    g = df_s.groupby("시간", as_index=False)["합계"].sum()
+                    g["역"] = s_name
+                    hr_frames.append(g)
+            if hr_frames:
+                hdf = pd.concat(hr_frames).sort_values("시간")
+                fig = px.line(hdf, x="시간", y="합계", color="역", markers=True,
+                              template=PLOTLY_TEMPLATE,
+                              labels={"합계": "이용객(명)", "시간": "시간대(시)"})
+                fig.update_layout(height=380, margin=dict(t=20, b=10),
+                                  legend=dict(orientation="h", y=1.1))
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("시간대 데이터가 없습니다.")
+
+        # 일별 추이 비교 (기간에 여러 날짜가 있을 때만)
+        if any(df_s["날짜"].nunique() > 1 for df_s in loaded.values()):
+            st.subheader("일별 이용 추이 비교")
+            dd = []
+            for s_name, df_s in loaded.items():
+                g = df_s.groupby("날짜", as_index=False)["합계"].sum()
+                g["역"] = s_name
+                dd.append(g)
+            ddf = pd.concat(dd)
+            ddf["날짜"] = pd.to_datetime(ddf["날짜"], format="%Y%m%d", errors="coerce")
+            fig = px.line(ddf.dropna(subset=["날짜"]), x="날짜", y="합계", color="역",
+                          markers=True, template=PLOTLY_TEMPLATE,
+                          labels={"합계": "이용객(명)"})
+            fig.update_layout(height=400, margin=dict(t=20, b=10),
+                              legend=dict(orientation="h", y=1.1))
+            st.plotly_chart(fig, use_container_width=True)
+
+    # 4) 혼잡도 비교 (실시간 API)
+    st.subheader("혼잡도 비교")
+    busy_frames = []
+    with st.spinner("혼잡도 데이터 로딩 중..."):
+        for s_name in fav:
+            bdf, berr = load_congestion(keys["busy"], s_name)
+            if berr or bdf is None or bdf.empty:
+                continue
+            bsel = filter_by_station(bdf, s_name)
+            if bsel.empty:
+                continue
+            tcols = detect_time_cols(bsel)
+            if not tcols:
+                continue
+            bm = bsel.melt(value_vars=tcols, var_name="시간대", value_name="혼잡도")
+            bm["혼잡도"] = to_num(bm["혼잡도"])
+            g = (bm.dropna(subset=["혼잡도"])
+                 .groupby("시간대", as_index=False)["혼잡도"].mean())
+            g["역"] = s_name
+            busy_frames.append(g)
+    if busy_frames:
+        bfd = pd.concat(busy_frames)
+        fig = px.line(bfd, x="시간대", y="혼잡도", color="역", markers=True,
+                      template=PLOTLY_TEMPLATE)
+        fig.add_hline(y=100, line_dash="dash", line_color="red",
+                      annotation_text="혼잡 기준(100%)")
+        fig.update_layout(height=420, margin=dict(t=20, b=10),
+                          legend=dict(orientation="h", y=1.12))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("역별 시간대 평균 혼잡도 (100% = 정원 기준 만석)")
+    else:
+        st.info("혼잡도 데이터를 불러오지 못했습니다. (BUSY_API_KEY 설정 또는 데이터 제공 여부를 확인하세요)")
+
+    st.divider()
+    st.caption("ⓒ 서울교통공사 역 분석 대시보드 · 관심역 비교 분석")
+    st.stop()   # 비교 페이지는 여기서 끝 (아래 종합 현황 코드는 실행하지 않음)
+
+
+# ═════════════════════════════════════════════
+# 페이지 1: 역 종합 현황
+# ═════════════════════════════════════════════
+# ── 1) 역 검색 (최상단) ──
+col_search, col_select = st.columns([1, 1.6])
 if stations:
     search = col_search.text_input("🔍 역 검색", placeholder="예: 강남, 시청, 왕십리")
     filtered = ([s for s in stations if norm_station(search) in norm_station(s)]
@@ -757,65 +954,7 @@ else:
         st.error(f"승하차 API: {rid_err}")
 
 # ── 2) 조회 방식: 일별 / 월별 / 기간 설정 ──
-mode = st.radio("조회 방식", ["일별", "월별", "기간 설정"], horizontal=True)
-
-date_list = []          # 조회할 날짜들(dt.date 리스트)
-period_label = ""       # 화면에 보여줄 기간 문구
-
-if mode == "일별":
-    d = st.date_input("날짜", value=MAX_DAY, min_value=MIN_DAY, max_value=MAX_DAY)
-    date_list = [d]
-    period_label = d.strftime("%Y-%m-%d")
-
-elif mode == "월별":
-    # 2025-01부터 이번 달까지 모두 선택 가능 (최신 달이 먼저 보이게)
-    months = []
-    _m = MAX_DAY.replace(day=1)
-    _stop = MIN_DAY.replace(day=1)
-    while _m >= _stop:
-        months.append(_m.strftime("%Y-%m"))
-        _m = (_m - dt.timedelta(days=1)).replace(day=1)
-    month_sel = st.selectbox("월 선택", months)
-    y, m = map(int, month_sel.split("-"))
-    d0 = dt.date(y, m, 1)
-    d1 = (dt.date(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
-          - dt.timedelta(days=1))                      # 그 달의 마지막 날
-    s, e = max(d0, MIN_DAY), min(d1, MAX_DAY)          # 제공 범위와 교집합
-    if s <= e:
-        date_list = [s + dt.timedelta(days=i) for i in range((e - s).days + 1)]
-    period_label = month_sel
-
-else:  # 기간 설정
-    rng = st.date_input("기간 (시작 ~ 종료)",
-                        value=(max(MIN_DAY, MAX_DAY - dt.timedelta(days=6)), MAX_DAY),
-                        min_value=MIN_DAY, max_value=MAX_DAY)
-    # 날짜를 고르는 중에는 값이 1개만 들어올 수 있어 안전하게 처리
-    if isinstance(rng, (tuple, list)):
-        if len(rng) == 2:
-            s, e = rng
-        elif len(rng) == 1:
-            s = e = rng[0]
-        else:
-            s = e = MAX_DAY
-    else:
-        s = e = rng
-    date_list = [s + dt.timedelta(days=i) for i in range((e - s).days + 1)]
-    period_label = f"{s.strftime('%Y-%m-%d')} ~ {e.strftime('%Y-%m-%d')}"
-
-st.caption("ℹ️ **2025년 데이터**는 첨부된 통계 파일에서, **최근 일주일**은 실시간 API에서 조회합니다. "
-           "2026년 중 일주일 이전 날짜는 두 데이터의 제공 범위 밖이라 조회되지 않아요.")
-
-with st.expander("🔑 API 키 설정 상태"):
-    labels = {
-        "riders": "승하차 (RIDERS_API_KEY · 공공데이터포털)",
-        "transfer": "환승 (TRANSFER_API_KEY)",
-        "building": "건축 (BUILDING_API_KEY)",
-        "busy": "혼잡도 (BUSY_API_KEY)",
-        "elevator": "승강기 (ELEVATOR_API_KEY)",
-    }
-    for k, label in labels.items():
-        st.write(("✅ " if keys[k] else "❌ ") + label)
-    st.caption("보안을 위해 키 값 자체는 표시되지 않습니다.")
+mode, date_list, period_label = select_period("main")
 
 # 추이 그래프 등에서 쓰는 기준일 = 조회 기간의 마지막 날
 base_date = date_list[-1] if date_list else MAX_DAY
