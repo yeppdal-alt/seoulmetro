@@ -40,12 +40,11 @@ else:
 cmin, cmax = csv_date_range()
 if not cmin:
     st.warning("2025년 승하차 통계 파일을 찾을 수 없어 요일 분석·예측을 할 수 없습니다.")
-    # 문제 파악을 돕기 위해, 앱 폴더에서 발견된 CSV 파일 목록을 보여준다
-    found = [os.path.basename(f) for f in find_csv_files()]
-    if found:
-        st.caption("📂 폴더에서 발견된 CSV: " + ", ".join(found)
-                   + " → 파일은 있지만 '수송일자' 컬럼을 읽지 못했습니다. "
-                     "원본 그대로(수정 없이) 올렸는지 확인해 주세요.")
+    # 문제 파악을 돕기 위해, 파일별 상세 진단을 보여준다
+    diags = csv_diagnostic()
+    if diags:
+        for msg in diags:
+            st.caption("🔎 " + msg)
     else:
         st.caption(f"📂 main.py와 같은 폴더에 CSV 파일이 없습니다. "
                    f"'{CSV_FILE}' 파일을 저장소에 함께 올려주세요. "
