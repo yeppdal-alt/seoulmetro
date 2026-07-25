@@ -1,19 +1,27 @@
 # -*- coding: utf-8 -*-
 """
-서울교통공사 역 분석 대시보드
+서울교통공사 역 분석 대시보드 (main.py)
 - 승하차인원 / 환승인원 / 혼잡도 / 역사 건축 현황 / 승강기(교통약자 시설)
-- 모든 API Key는 st.secrets에서 로드 (하드코딩 금지)
+- AI 분석 도우미: Upstage Solar API (모델 solar-open2, openai 라이브러리 사용)
+- 모든 API Key는 st.secrets에서 로드 (코드에 하드코딩 금지!)
+- 실행: streamlit run main.py
 """
-import re
-import datetime as dt
-import xml.etree.ElementTree as ET
-from urllib.parse import quote
+import re                              # 문자열에서 괄호 등을 제거할 때 사용
+import datetime as dt                  # 날짜 계산용
+import xml.etree.ElementTree as ET     # XML 응답 해석용
+from urllib.parse import quote         # URL에 한글을 안전하게 넣기 위한 도구
 
-import pandas as pd
-import requests
-import streamlit as st
-import plotly.express as px
-import plotly.graph_objects as go
+import pandas as pd                    # 표(데이터프레임) 처리
+import requests                        # API 호출(HTTP 요청)
+import streamlit as st                 # 웹 화면을 만드는 프레임워크
+import plotly.express as px            # 간단한 그래프
+import plotly.graph_objects as go      # 세밀하게 조절하는 그래프
+
+# AI 챗봇용 openai 라이브러리 (설치가 안 돼 있어도 대시보드는 동작하도록 처리)
+try:
+    from openai import OpenAI
+except ImportError:
+    OpenAI = None
 
 # ─────────────────────────────────────────────
 # 기본 설정
@@ -25,18 +33,63 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# ── 화면을 세련되게 꾸미는 CSS (색·글꼴·카드 모양 등) ──
 st.markdown(
     """
     <style>
-    .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
-    [data-testid="stMetric"] {
-        background: rgba(28, 131, 225, 0.06);
-        border: 1px solid rgba(28, 131, 225, 0.15);
-        border-radius: 12px; padding: 12px 16px;
+    /* 한국어에 잘 어울리는 Pretendard 글꼴 불러오기 */
+    @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
+    html, body, [class*="css"] {font-family: 'Pretendard', sans-serif;}
+
+    .block-container {padding-top: 1rem; padding-bottom: 2rem; max-width: 1200px;}
+
+    /* 상단 히어로(제목) 배너 */
+    .hero {
+        background: linear-gradient(120deg, #0052A4 0%, #1C83E1 55%, #00A84D 120%);
+        border-radius: 18px; padding: 26px 30px; margin-bottom: 6px;
+        color: #fff; box-shadow: 0 8px 24px rgba(0, 82, 164, 0.25);
     }
-    [data-testid="stMetricLabel"] {font-size: 0.85rem;}
+    .hero-title {font-size: 1.9rem; font-weight: 800; letter-spacing: -0.5px;}
+    .hero-title span {font-weight: 500; opacity: 0.9;}
+    .hero-sub {margin-top: 6px; font-size: 0.9rem; opacity: 0.85;}
+
+    /* KPI 지표 카드 */
+    [data-testid="stMetric"] {
+        background: linear-gradient(180deg, rgba(28,131,225,0.08), rgba(28,131,225,0.02));
+        border: 1px solid rgba(28, 131, 225, 0.18);
+        border-radius: 14px; padding: 14px 18px;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+        transition: transform .15s ease;
+    }
+    [data-testid="stMetric"]:hover {transform: translateY(-2px);}
+    [data-testid="stMetricLabel"] {font-size: 0.85rem; opacity: 0.8;}
+
+    /* 탭을 알약(pill) 모양으로 */
+    .stTabs [data-baseweb="tab-list"] {gap: 6px; flex-wrap: wrap;}
+    .stTabs [data-baseweb="tab"] {
+        border-radius: 999px; padding: 8px 16px;
+        background: rgba(28, 131, 225, 0.07);
+    }
+    .stTabs [aria-selected="true"] {
+        background: #1C83E1 !important; color: #fff !important;
+    }
+
+    /* 채팅 말풍선 */
+    [data-testid="stChatMessage"] {
+        border-radius: 16px; padding: 4px 10px;
+        background: rgba(28, 131, 225, 0.04);
+        margin-bottom: 4px;
+    }
+
+    /* 사이드바 배경 톤 */
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, rgba(0,82,164,0.05), transparent 40%);
+    }
+
+    /* 모바일(좁은 화면) 대응 */
     @media (max-width: 640px) {
-        [data-testid="stMetricValue"] {font-size: 1.3rem;}
+        [data-testid="stMetricValue"] {font-size: 1.25rem;}
+        .hero-title {font-size: 1.3rem;}
         .block-container {padding-left: 0.8rem; padding-right: 0.8rem;}
     }
     </style>
@@ -538,8 +591,17 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 # 메인
 # ─────────────────────────────────────────────
-st.title(f"📊 {station} 역 종합 현황")
-st.caption(f"기준일: {base_date.strftime('%Y-%m-%d')} · 출처: 서울열린데이터광장 / 공공데이터포털")
+# ── 상단 히어로 배너 (선택한 역 이름 + 기준일) ──
+st.markdown(
+    f"""
+    <div class="hero">
+      <div class="hero-title">🚇 {station} <span>역 종합 현황</span></div>
+      <div class="hero-sub">기준일 {base_date.strftime('%Y-%m-%d')} ·
+      서울열린데이터광장 / 공공데이터포털 데이터</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 with st.spinner("선택 역 승하차 데이터 로딩 중..."):
     sel, sel_err, sel_note = load_ridership(keys["riders"], date_str, station)
@@ -562,8 +624,9 @@ k4.metric("환승 인원(일)", f"{trans_total:,}명" if trans_total else "데�
 
 st.divider()
 
-tab_ride, tab_trans, tab_busy, tab_bld, tab_elev = st.tabs(
-    ["🚏 승하차 분석", "🔄 환승 인원", "📈 혼잡도", "🏗️ 역사 건축 현황", "♿ 승강기·교통약자 시설"]
+tab_ride, tab_trans, tab_busy, tab_bld, tab_elev, tab_ai = st.tabs(
+    ["🚏 승하차 분석", "🔄 환승 인원", "📈 혼잡도", "🏗️ 역사 건축 현황",
+     "♿ 승강기·교통약자 시설", "🤖 AI 도우미"]
 )
 
 # ── 탭1: 승하차 ──
@@ -792,5 +855,99 @@ with tab_elev:
             st.subheader("시설 목록")
             st.dataframe(elev_sel, use_container_width=True, hide_index=True)
 
+# ── 탭6: AI 도우미 (Upstage Solar API, 모델 solar-open2) ──
+with tab_ai:
+    st.subheader("🤖 AI 분석 도우미")
+    st.caption("역 데이터에 대해 궁금한 점을 물어보세요. 이전 대화를 기억하며 이어서 답해요.")
+
+    # 1) Secrets에서 Solar API 키를 불러온다 (코드에 키를 직접 쓰지 않는다!)
+    solar_key = get_secret("SOLAR_API_KEY")
+
+    if OpenAI is None:
+        # openai 라이브러리가 설치되지 않은 경우
+        st.info("openai 라이브러리가 필요해요. 터미널에서 `pip install openai` 후 다시 실행해 주세요.")
+    elif not solar_key:
+        # 키가 등록되지 않은 경우
+        st.info("Secrets에 SOLAR_API_KEY를 등록하면 AI 도우미를 사용할 수 있어요.")
+    else:
+        # 2) 대화 기록을 세션(session_state)에 저장 → 새로고침 전까지 기억
+        if "chat_messages" not in st.session_state:
+            st.session_state.chat_messages = []   # [{"role": "user"/"assistant", "content": "..."}]
+
+        # 대화를 처음부터 다시 시작하고 싶을 때 누르는 버튼
+        if st.session_state.chat_messages and st.button("🗑️ 대화 지우기"):
+            st.session_state.chat_messages = []
+            st.rerun()
+
+        # 3) 지금까지의 대화를 말풍선으로 다시 그려준다
+        for msg in st.session_state.chat_messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        # 4) 채팅 입력창 (화면 아래에 고정됨)
+        user_input = st.chat_input("예: 이 역은 몇 시에 제일 붐비나요?")
+
+        if user_input:
+            # (1) 사용자의 말을 기록하고 말풍선으로 표시
+            st.session_state.chat_messages.append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            # (2) AI에게 줄 성격(시스템 프롬프트) + 현재 화면 정보(참고용)
+            system_prompt = "너는 따뜻하고 친절한 데이터 분석 선생님이야. 반드시 순수 한국어로만 답해"
+            context = f"[참고 정보] 사용자가 보고 있는 역: {station}, 기준일: {base_date.strftime('%Y-%m-%d')}"
+            if not sel.empty:
+                context += (f", 이날 승차 {int(sel['승차'].sum()):,}명 / "
+                            f"하차 {int(sel['하차'].sum()):,}명")
+
+            # 시스템 프롬프트 → 참고 정보 → 지금까지의 대화 순서로 전달
+            messages = ([{"role": "system", "content": system_prompt},
+                         {"role": "system", "content": context}]
+                        + st.session_state.chat_messages)
+
+            # (3) Solar API를 호출하고, 답을 글자 단위로 실시간 표시(스트리밍)
+            answer = None
+            with st.chat_message("assistant"):
+                try:
+                    # openai 라이브러리로 Upstage Solar 서버에 접속
+                    client = OpenAI(api_key=solar_key,
+                                    base_url="https://api.upstage.ai/v1")
+                    common = dict(
+                        model="solar-open2",     # 모델 이름은 글자 그대로 사용
+                        messages=messages,
+                        stream=True,             # 스트리밍(실시간 출력) 켜기
+                    )
+                    try:
+                        # 추론(생각) 기능 끄기 → 답이 빨리 나온다
+                        stream = client.chat.completions.create(
+                            reasoning_effort="none", **common)
+                    except TypeError:
+                        # 구버전 openai 라이브러리 대비: extra_body로 전달
+                        stream = client.chat.completions.create(
+                            extra_body={"reasoning_effort": "none"}, **common)
+
+                    # 스트리밍 조각(chunk)에서 글자만 뽑아 흘려보내는 함수
+                    def token_stream():
+                        for chunk in stream:
+                            if chunk.choices:
+                                piece = chunk.choices[0].delta.content
+                                if piece:
+                                    yield piece
+
+                    # st.write_stream: 글자가 실시간으로 흘러나오듯 표시
+                    answer = st.write_stream(token_stream())
+                except Exception:
+                    # 실패해도 무서운 에러 화면 대신 친절한 한국어 안내만 보여준다
+                    st.warning(
+                        "죄송해요, 지금은 AI 답변을 받아오지 못했어요. 😥\n\n"
+                        "잠시 후 다시 시도해 주세요. 계속 안 되면 SOLAR_API_KEY가 "
+                        "올바른지, 인터넷 연결이 되어 있는지 확인해 주세요."
+                    )
+
+            # (4) AI의 답도 대화 기록에 저장 → 다음 질문에서 문맥을 기억
+            if answer:
+                st.session_state.chat_messages.append(
+                    {"role": "assistant", "content": answer})
+
 st.divider()
-st.caption("ⓒ 서울교통공사 역 분석 대시보드 · 데이터: 서울열린데이터광장, 공공데이터포털 · API 키는 Secrets로 안전하게 관리됩니다.")
+st.caption("ⓒ 서울교통공사 역 분석 대시보드 · 데이터: 서울열린데이터광장, 공공데이터포털 · AI: Upstage Solar · API 키는 Secrets로 안전하게 관리됩니다.")
