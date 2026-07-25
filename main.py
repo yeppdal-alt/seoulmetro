@@ -131,6 +131,18 @@ st.markdown(
         [data-testid="stMetricValue"] {font-size: 1.25rem;}
         .hero-title {font-size: 1.3rem;}
         .block-container {padding-left: 0.8rem; padding-right: 0.8rem; padding-top: 2.6rem;}
+
+        /* 좌우로 나눈 칸(st.columns)을 세로로 쌓아서 그래프가 찌그러지지 않게 */
+        [data-testid="stHorizontalBlock"] {flex-direction: column; gap: 0.6rem;}
+        [data-testid="stHorizontalBlock"] > div {
+            width: 100% !important; min-width: 100% !important; flex: 1 1 100% !important;
+        }
+
+        /* 그래프 카드의 안쪽 여백 축소 → 그래프 영역 최대화 */
+        [data-testid="stPlotlyChart"] {padding: 4px;}
+
+        /* 페이지 메뉴(라디오)가 줄바꿈되며 자연스럽게 흐르게 */
+        [data-testid="stRadio"] > div {flex-wrap: wrap; gap: 4px;}
     }
     </style>
     """,
@@ -154,6 +166,15 @@ LINE_COLORS = {
     "경춘선": "#0C8E72", "서해선": "#8FC31F", "인천1호선": "#7CA8D5",
     "인천2호선": "#ED8B00", "GTX-A": "#9A6292",
 }
+
+
+def show_chart(fig):
+    """모든 차트를 모바일에서도 깨지지 않게 공통 설정으로 출력한다.
+    - 좌우 여백 최소화, 글자 크기 통일
+    - responsive 설정: 화면 크기가 바뀌면 그래프도 다시 그려짐"""
+    fig.update_layout(margin=dict(l=10, r=10), font=dict(size=12), autosize=True)
+    st.plotly_chart(fig, use_container_width=True,
+                    config={"displayModeBar": False, "responsive": True})
 
 
 # ─────────────────────────────────────────────
@@ -951,7 +972,7 @@ if page == "⚖️ 관심역 비교 분석":
                          color_discrete_map={"승차": "#3B9DF8", "하차": "#FF7E9D"})
             fig.update_layout(height=380, margin=dict(t=20, b=10),
                               legend=dict(orientation="h", y=1.1))
-            st.plotly_chart(fig, use_container_width=True)
+            show_chart(fig)
         with c2:
             st.subheader("시간대별 이용 패턴 비교")
             hr_frames = []
@@ -967,7 +988,7 @@ if page == "⚖️ 관심역 비교 분석":
                               labels={"합계": "이용객(명)", "시간": "시간대(시)"})
                 fig.update_layout(height=380, margin=dict(t=20, b=10),
                                   legend=dict(orientation="h", y=1.1))
-                st.plotly_chart(fig, use_container_width=True)
+                show_chart(fig)
             else:
                 st.info("시간대 데이터가 없습니다.")
 
@@ -986,7 +1007,7 @@ if page == "⚖️ 관심역 비교 분석":
                           labels={"합계": "이용객(명)"})
             fig.update_layout(height=400, margin=dict(t=20, b=10),
                               legend=dict(orientation="h", y=1.1))
-            st.plotly_chart(fig, use_container_width=True)
+            show_chart(fig)
 
     # 4) 혼잡도 비교 (실시간 API)
     st.subheader("혼잡도 비교")
@@ -1015,11 +1036,13 @@ if page == "⚖️ 관심역 비교 분석":
         fig = px.line(bfd, x="시간대", y="혼잡도", color="역", markers=True,
                       template=PLOTLY_TEMPLATE,
                       category_orders={"시간대": order})
+        # 시간대 눈금이 많아 모바일에서 겹치지 않게 기울이고 개수 제한
+        fig.update_xaxes(tickangle=-45, tickfont=dict(size=10), nticks=13)
         fig.add_hline(y=100, line_dash="dash", line_color="red",
                       annotation_text="혼잡 기준(100%)")
         fig.update_layout(height=420, margin=dict(t=20, b=10),
                           legend=dict(orientation="h", y=1.12))
-        st.plotly_chart(fig, use_container_width=True)
+        show_chart(fig)
         st.caption("역별 시간대 평균 혼잡도 (100% = 정원 기준 만석)")
     else:
         st.info("혼잡도 데이터를 불러오지 못했습니다. (BUSY_API_KEY 설정 또는 데이터 제공 여부를 확인하세요)")
@@ -1083,11 +1106,13 @@ if page == "📈 혼잡도":
                           color=label_col if label_col else None,
                           markers=True, template=PLOTLY_TEMPLATE,
                           category_orders={"시간대": order})
+            # 시간대 눈금이 38개라 모바일에서 겹치지 않게 기울이고 개수 제한
+            fig.update_xaxes(tickangle=-45, tickfont=dict(size=10), nticks=13)
             fig.add_hline(y=100, line_dash="dash", line_color="red",
                           annotation_text="혼잡 기준(100%)")
             fig.update_layout(height=420, margin=dict(t=20, b=10),
                               legend=dict(orientation="h", y=1.12))
-            st.plotly_chart(fig, use_container_width=True)
+            show_chart(fig)
         st.subheader("원본 데이터")
         st.dataframe(target.head(300), use_container_width=True, hide_index=True)
     st.stop()   # 이 페이지는 여기서 끝
@@ -1133,7 +1158,7 @@ if page == "🗺️ 주변 역 지도":
             fig.update_layout(mapbox_style="open-street-map",
                               margin=dict(t=0, b=0, l=0, r=0),
                               legend=dict(orientation="h", y=-0.04))
-            st.plotly_chart(fig, use_container_width=True)
+            show_chart(fig)
 
             # ── 주변 역 목록 (호선 묶음 + 거리) ──
             info = (near.groupby("역명")
@@ -1168,8 +1193,9 @@ if page == "🗺️ 주변 역 지도":
                 hm = hm[[c for c in time_order if c in hm.columns]]
                 fig = px.imshow(hm, aspect="auto", color_continuous_scale="YlOrRd",
                                 labels=dict(x="시간대", y="역", color="혼잡도(%)"))
+                fig.update_xaxes(tickangle=-45, tickfont=dict(size=9))
                 fig.update_layout(height=120 + 46 * len(hm), margin=dict(t=20, b=10))
-                st.plotly_chart(fig, use_container_width=True)
+                show_chart(fig)
                 st.caption("색이 진할수록 혼잡 (요일·상하행 평균, 100% = 정원 기준 만석)")
             else:
                 st.info("주변 역의 혼잡도 데이터를 불러오지 못했습니다. (BUSY_API_KEY 필요)")
@@ -1338,7 +1364,7 @@ with tab_ride:
                               xaxis_title="시간대(시)", yaxis_title="인원(명)",
                               margin=dict(t=20, b=10),
                               legend=dict(orientation="h", y=1.1))
-            st.plotly_chart(fig, use_container_width=True)
+            show_chart(fig)
 
         c1, c2 = st.columns(2)
         with c1:
@@ -1351,7 +1377,7 @@ with tab_ride:
                          color_discrete_map={"승차": "#3B9DF8", "하차": "#FF7E9D"})
             fig.update_layout(height=360, margin=dict(t=20, b=10),
                               legend=dict(orientation="h", y=1.1))
-            st.plotly_chart(fig, use_container_width=True)
+            show_chart(fig)
         with c2:
             # 기간/월별 조회면 이미 받아온 데이터로 일별 추이를 그리고,
             # 일별 조회면 최근 7일 추이를 따로 수집해서 보여준다
@@ -1378,7 +1404,7 @@ with tab_ride:
                 fig.update_layout(template=PLOTLY_TEMPLATE, height=360,
                                   margin=dict(t=20, b=10),
                                   legend=dict(orientation="h", y=1.1))
-                st.plotly_chart(fig, use_container_width=True)
+                show_chart(fig)
 
     if not rid_df.empty:
         snapshot_hr = (rid_df["시간"].iloc[0]
@@ -1398,7 +1424,7 @@ with tab_ride:
                      color_discrete_map={"선택 역": "#FF5C8A", "기타": "#C9DCF0"})
         fig.update_layout(height=560, yaxis=dict(autorange="reversed"),
                           margin=dict(t=20, b=10), showlegend=False)
-        st.plotly_chart(fig, use_container_width=True)
+        show_chart(fig)
     elif rid_err:
         st.warning(f"역 목록/순위 조회 실패: {rid_err}")
 
@@ -1422,7 +1448,7 @@ with tab_trans:
                              template=PLOTLY_TEMPLATE,
                              color_discrete_sequence=px.colors.qualitative.Set2)
                 fig.update_layout(height=380, margin=dict(t=20, b=10), showlegend=False)
-                st.plotly_chart(fig, use_container_width=True)
+                show_chart(fig)
             st.dataframe(trans_sel, use_container_width=True, hide_index=True)
 
         c_stn = find_col(trans_df.columns, STATION_COL_KWS)
@@ -1441,7 +1467,7 @@ with tab_trans:
                          color_discrete_map={"선택 역": "#FF5C8A", "기타": "#C9DCF0"})
             fig.update_layout(height=480, yaxis=dict(autorange="reversed"),
                               margin=dict(t=20, b=10), showlegend=False)
-            st.plotly_chart(fig, use_container_width=True)
+            show_chart(fig)
 
 # ── 탭4: 역사 건축 현황 ──
 with tab_bld:
@@ -1500,7 +1526,7 @@ with tab_elev:
                                  template=PLOTLY_TEMPLATE,
                                  color_discrete_sequence=px.colors.qualitative.Pastel)
                     fig.update_layout(height=340, margin=dict(t=20, b=10))
-                    st.plotly_chart(fig, use_container_width=True)
+                    show_chart(fig)
                 else:
                     st.metric("총 시설 수", f"{len(elev_sel)}대")
             with c2:
@@ -1513,7 +1539,7 @@ with tab_elev:
                                  color_discrete_sequence=["#00A84D", "#FF7E9D", "#C9DCF0"])
                     fig.update_layout(height=340, margin=dict(t=20, b=10),
                                       showlegend=False)
-                    st.plotly_chart(fig, use_container_width=True)
+                    show_chart(fig)
                 else:
                     st.info("상태 컬럼을 인식하지 못했습니다. 아래 표를 확인하세요.")
             st.subheader("시설 목록")
