@@ -48,7 +48,7 @@ SEOUL_BASE = "http://openapi.seoul.go.kr:8088"
 ODCLOUD_DOCS = "https://infuser.odcloud.kr/oas/docs?namespace=15044258/v1"
 ODCLOUD_API = "https://api.odcloud.kr/api"
 TIMEOUT = 12
-TREND_DAYS = 14
+TREND_DAYS = 7  # 승하차 API가 최근 일주일 데이터만 제공
 
 PLOTLY_TEMPLATE = "plotly_white"
 
@@ -187,9 +187,11 @@ def fetch_seoul_with_fallback(api_key, service, fmt, station=None):
 
 
 # ─────────────────────────────────────────────
-# 1) 역별 승하차인원 (공공데이터포털 B553766/psgr/)
+# 1) 역별 승하차인원 (공공데이터포털 B553766/psgr/getStnPsgr)
 # ─────────────────────────────────────────────
-RIDERS_ENDPOINT = "https://apis.data.go.kr/B553766/psgr/"
+# Endpoint: https://apis.data.go.kr/B553766/psgr (상세기능: 역별승하차인원정보 조회)
+RIDERS_BASE = "https://apis.data.go.kr/B553766/psgr"
+RIDERS_ENDPOINT = f"{RIDERS_BASE}/getStnPsgr"
 
 
 def _deep_get(obj, key):
@@ -232,14 +234,21 @@ def _find_records(obj):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def _fetch_riders_page(api_key: str, page: int, num_rows: int, date_str: str = ""):
-    """반환: (rows|None, err|None, total_count)"""
+def _fetch_riders_page(api_key: str, page: int, num_rows: int,
+                       pasng_ymd: str = "", stn_nm: str = "", pasng_hr: str = ""):
+    """getStnPsgr 호출. 반환: (rows|None, err|None, total_count)
+    요청변수: serviceKey, pageNo, numOfRows, dataType,
+              pasngYmd(통행일자, 최근 일주일), stnNm(역명 포함검색), pasngHr(00~23)"""
     if not api_key:
         return None, "API 키가 Secrets에 설정되지 않았습니다.", 0
     params = {"serviceKey": api_key, "pageNo": page,
               "numOfRows": num_rows, "dataType": "JSON"}
-    if date_str:
-        params["dt"] = date_str
+    if pasng_ymd:
+        params["pasngYmd"] = pasng_ymd
+    if stn_nm:
+        params["stnNm"] = stn_nm
+    if pasng_hr:
+        params["pasngHr"] = pasng_hr
     try:
         r = requests.get(RIDERS_ENDPOINT, params=params, timeout=TIMEOUT)
     except requests.RequestException:
@@ -284,27 +293,26 @@ def _fetch_riders_page(api_key: str, page: int, num_rows: int, date_str: str = "
 
 
 def _standardize_riders(df: pd.DataFrame):
-    """API 응답 컬럼명을 표준(날짜/호선/역명/승차/하차/합계)으로 변환."""
+    """API 응답 컬럼명을 표준(날짜/호선/역명/시간/승차/하차/합계)으로 변환."""
     cols = list(df.columns)
-    c_date = find_col(cols, ["useYmd", "use_ymd", "sttusYmd", "ymd", "opDate", "일자", "date"])
-    if not c_date:
-        c_date = find_col([c for c in cols if "reg" not in str(c).lower()], ["dt"])
-    c_stn = (find_col(cols, ["stnNm", "staNm", "stationNm", "역명", "stns_nm", "sub_sta_nm"])
+    c_date = find_col(cols, ["pasngYmd", "useYmd", "ymd", "일자", "date"])
+    c_stn = (find_col(cols, ["stnNm", "staNm", "stationNm", "역명"])
              or find_col(cols, ["stn", "sta"]))
     c_line = find_col(cols, ["lineNm", "line", "호선", "rout"])
+    c_hour = find_col(cols, ["pasngHr", "hr", "시간"])
     c_ride = find_col(cols, ["ride", "gton", "승차"])
     c_alight = find_col(cols, ["algh", "alight", "gtoff", "하차"])
     if not c_stn:
         return pd.DataFrame(), "역명 컬럼 인식 실패. 응답 컬럼: " + ", ".join(map(str, cols))
     if not (c_ride and c_alight):
-        # 이름으로 못 찾으면: 코드/날짜성 컬럼을 제외한 숫자 컬럼 2개를 승차/하차로 간주
+        # 이름으로 못 찾으면: 코드/날짜/시간성 컬럼을 제외한 숫자 컬럼 2개를 승차/하차로 간주
         nums = []
         for c in numeric_cols(df):
             name = str(c).lower()
-            if c in (c_date,) or "cd" in name or "no" in name:
+            if c in (c_date, c_hour) or "cd" in name or name.endswith("no"):
                 continue
             v = to_num(df[c])
-            if v.max() is not None and pd.notna(v.max()) and v.max() > 5_000_000:
+            if pd.notna(v.max()) and v.max() > 5_000_000:
                 continue  # 날짜(YYYYMMDD) 등 제외
             nums.append(c)
         if len(nums) >= 2:
@@ -315,6 +323,7 @@ def _standardize_riders(df: pd.DataFrame):
         "날짜": (df[c_date].astype(str).str.replace("-", "").str[:8] if c_date else ""),
         "호선": (df[c_line].astype(str) if c_line else "전체"),
         "역명": df[c_stn].astype(str),
+        "시간": (df[c_hour].astype(str).str.zfill(2) if c_hour else ""),
         "승차": to_num(df[c_ride]).fillna(0).astype(int),
         "하차": to_num(df[c_alight]).fillna(0).astype(int),
     })
@@ -323,11 +332,13 @@ def _standardize_riders(df: pd.DataFrame):
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def load_riders_raw(api_key: str, date_str: str = "", max_pages: int = 3):
+def load_riders_raw(api_key: str, pasng_ymd: str = "", stn_nm: str = "",
+                    pasng_hr: str = "", max_pages: int = 5):
     """페이지네이션 포함 원본 수집 → 표준 DataFrame. 반환 (df, err)."""
     all_rows = []
     for page in range(1, max_pages + 1):
-        rows, err, total = _fetch_riders_page(api_key, page, 1000, date_str)
+        rows, err, total = _fetch_riders_page(api_key, page, 1000,
+                                              pasng_ymd, stn_nm, pasng_hr)
         if err:
             if page == 1:
                 return pd.DataFrame(), err
@@ -342,53 +353,39 @@ def load_riders_raw(api_key: str, date_str: str = "", max_pages: int = 3):
     return _standardize_riders(pd.DataFrame(all_rows))
 
 
-def load_ridership(api_key: str, date_str: str):
-    """선택 날짜 기준 데이터. 반환 (df, err, note)."""
-    df, err = load_riders_raw(api_key, date_str)  # 서버측 날짜 필터 시도
+def load_ridership(api_key: str, date_str: str, station: str = ""):
+    """선택 날짜(+역) 기준 데이터. stnNm은 '포함' 검색이므로 재필터. 반환 (df, err, note)."""
+    df, err = load_riders_raw(api_key, date_str, station)
     if err:
         return pd.DataFrame(), err, None
-    note = None
     if df.empty:
-        df, err = load_riders_raw(api_key, "")  # 날짜 파라미터 미지원 대비
-        if err:
-            return pd.DataFrame(), err, None
-    if df.empty:
-        return df, None, None
-    if "날짜" in df.columns and df["날짜"].astype(bool).any():
-        dates = df["날짜"]
-        if (dates == date_str).any():
-            df = df[dates == date_str]
-        else:
-            latest = dates[dates != ""].max()
-            df = df[dates == latest]
-            if latest and latest != date_str:
-                note = f"선택한 날짜의 데이터가 없어 최신 제공일({latest}) 기준으로 표시합니다."
-    return df.reset_index(drop=True), None, note
+        return df, None, "해당 날짜의 데이터가 없습니다. 이 API는 최근 일주일 데이터만 제공합니다."
+    if station:
+        df = df[df["역명"].apply(lambda x: station_match(x, station))]
+    return df.reset_index(drop=True), None, None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_station_list(api_key: str, date_str: str):
+    """역 목록 스냅샷: 08시 한 시간대만 조회해 가볍게 전체 역 목록/순위 구성.
+    반환 (df, err)."""
+    df, err = load_riders_raw(api_key, date_str, "", "08")
+    if (df is None or df.empty) and not err:
+        # pasngHr 미지원/데이터 없음 대비: 시간 필터 없이 제한적으로 조회
+        df, err = load_riders_raw(api_key, date_str, "", "", max_pages=3)
+    return df, err
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_trend(api_key: str, base_date: dt.date, station: str, days: int = TREND_DAYS):
-    # 1) 전체 데이터에 여러 날짜가 포함된 경우: 클라이언트에서 집계
-    full, err = load_riders_raw(api_key, "")
-    if not err and full is not None and not full.empty and full["날짜"].nunique() > 1:
-        sub = full[full["역명"].apply(lambda x: station_match(x, station))]
-        if not sub.empty:
-            g = (sub.groupby("날짜")[["승차", "하차"]].sum().reset_index()
-                 .sort_values("날짜").tail(days))
-            g["날짜"] = pd.to_datetime(g["날짜"], format="%Y%m%d", errors="coerce")
-            return g.dropna(subset=["날짜"])
-    # 2) 날짜별 개별 조회 (서버측 dt 필터 지원 시)
+    """최근 N일(최대 일주일) 역별 승하차 추이. 날짜별 stnNm 필터 조회."""
     recs = []
     for i in range(days):
         d = base_date - dt.timedelta(days=days - 1 - i)
         ds = d.strftime("%Y%m%d")
-        df, e = load_riders_raw(api_key, ds)
+        df, e = load_riders_raw(api_key, ds, station)
         if e or df is None or df.empty:
             continue
-        if "날짜" in df.columns and df["날짜"].nunique() > 1:
-            df = df[df["날짜"] == ds]
-            if df.empty:
-                continue
         sub = df[df["역명"].apply(lambda x: station_match(x, station))]
         if sub.empty:
             continue
@@ -501,14 +498,15 @@ with st.sidebar:
 
     base_date = st.date_input(
         "기준 날짜 (승하차 통계)",
-        value=dt.date.today() - dt.timedelta(days=4),
+        value=dt.date.today() - dt.timedelta(days=1),
+        min_value=dt.date.today() - dt.timedelta(days=7),
         max_value=dt.date.today() - dt.timedelta(days=1),
-        help="승하차 통계는 보통 3~4일 지연 제공됩니다.",
+        help="승하차 통계(통행일자)는 최근 일주일 데이터만 제공됩니다.",
     )
     date_str = base_date.strftime("%Y%m%d")
 
     with st.spinner("역 목록 로딩 중..."):
-        rid_df, rid_err, rid_note = load_ridership(keys["riders"], date_str)
+        rid_df, rid_err = load_station_list(keys["riders"], date_str)
 
     if not rid_df.empty:
         stations = sorted(rid_df["역명"].unique().tolist())
@@ -542,11 +540,11 @@ with st.sidebar:
 # ─────────────────────────────────────────────
 st.title(f"📊 {station} 역 종합 현황")
 st.caption(f"기준일: {base_date.strftime('%Y-%m-%d')} · 출처: 서울열린데이터광장 / 공공데이터포털")
-if rid_note:
-    st.info(rid_note)
 
-sel = (rid_df[rid_df["역명"].apply(lambda x: station_match(x, station))]
-       if not rid_df.empty else pd.DataFrame())
+with st.spinner("선택 역 승하차 데이터 로딩 중..."):
+    sel, sel_err, sel_note = load_ridership(keys["riders"], date_str, station)
+if sel_note:
+    st.info(sel_note)
 
 trans_df, trans_err = load_transfer(keys["transfer"])
 trans_sel = filter_by_station(trans_df, station)
@@ -570,23 +568,39 @@ tab_ride, tab_trans, tab_busy, tab_bld, tab_elev = st.tabs(
 
 # ── 탭1: 승하차 ──
 with tab_ride:
-    if rid_df.empty:
-        st.warning(rid_err or "해당 날짜의 승하차 데이터가 없습니다. 다른 날짜를 선택해 보세요.")
+    if sel_err:
+        st.warning(f"승하차 API: {sel_err}")
+    elif sel.empty:
+        st.info("선택한 역의 승하차 데이터가 없습니다. 다른 날짜를 선택해 보세요.")
     else:
+        # 시간대별 승하차 (pasngHr 기준)
+        if "시간" in sel.columns and sel["시간"].astype(bool).any():
+            st.subheader("시간대별 승하차")
+            hourly = (sel.groupby("시간", as_index=False)[["승차", "하차"]].sum()
+                      .sort_values("시간"))
+            fig = go.Figure()
+            fig.add_trace(go.Bar(x=hourly["시간"], y=hourly["승차"], name="승차",
+                                 marker_color="#1C83E1"))
+            fig.add_trace(go.Bar(x=hourly["시간"], y=hourly["하차"], name="하차",
+                                 marker_color="#FF6B6B"))
+            fig.update_layout(template=PLOTLY_TEMPLATE, barmode="group", height=380,
+                              xaxis_title="시간대(시)", yaxis_title="인원(명)",
+                              margin=dict(t=20, b=10),
+                              legend=dict(orientation="h", y=1.1))
+            st.plotly_chart(fig, use_container_width=True)
+
         c1, c2 = st.columns(2)
         with c1:
             st.subheader("호선별 승하차 (선택 역)")
-            if sel.empty:
-                st.info("선택한 역의 승하차 데이터가 없습니다.")
-            else:
-                m = sel.melt(id_vars=["호선"], value_vars=["승차", "하차"],
-                             var_name="구분", value_name="인원")
-                fig = px.bar(m, x="호선", y="인원", color="구분", barmode="group",
-                             template=PLOTLY_TEMPLATE,
-                             color_discrete_map={"승차": "#1C83E1", "하차": "#FF6B6B"})
-                fig.update_layout(height=360, margin=dict(t=20, b=10),
-                                  legend=dict(orientation="h", y=1.1))
-                st.plotly_chart(fig, use_container_width=True)
+            m = (sel.groupby("호선", as_index=False)[["승차", "하차"]].sum()
+                 .melt(id_vars=["호선"], value_vars=["승차", "하차"],
+                       var_name="구분", value_name="인원"))
+            fig = px.bar(m, x="호선", y="인원", color="구분", barmode="group",
+                         template=PLOTLY_TEMPLATE,
+                         color_discrete_map={"승차": "#1C83E1", "하차": "#FF6B6B"})
+            fig.update_layout(height=360, margin=dict(t=20, b=10),
+                              legend=dict(orientation="h", y=1.1))
+            st.plotly_chart(fig, use_container_width=True)
         with c2:
             st.subheader(f"최근 {TREND_DAYS}일 이용 추이")
             with st.spinner("추이 데이터 수집 중..."):
@@ -606,7 +620,14 @@ with tab_ride:
                                   legend=dict(orientation="h", y=1.1))
                 st.plotly_chart(fig, use_container_width=True)
 
-        st.subheader("전체 역 이용객 순위 (Top 20)")
+    if not rid_df.empty:
+        snapshot_hr = (rid_df["시간"].iloc[0]
+                       if "시간" in rid_df.columns and rid_df["시간"].astype(bool).any()
+                       else "")
+        title = "전체 역 이용객 순위 (Top 20)"
+        if snapshot_hr and rid_df["시간"].nunique() == 1:
+            title += f" · {snapshot_hr}시 시간대 기준"
+        st.subheader(title)
         top = (rid_df.groupby("역명", as_index=False)["합계"].sum()
                .sort_values("합계", ascending=False).head(20))
         top["선택"] = top["역명"].apply(
@@ -618,6 +639,8 @@ with tab_ride:
         fig.update_layout(height=560, yaxis=dict(autorange="reversed"),
                           margin=dict(t=20, b=10), showlegend=False)
         st.plotly_chart(fig, use_container_width=True)
+    elif rid_err:
+        st.warning(f"역 목록/순위 조회 실패: {rid_err}")
 
 # ── 탭2: 환승 ──
 with tab_trans:
