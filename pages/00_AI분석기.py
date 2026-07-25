@@ -6,7 +6,7 @@ AI 분석 페이지 (pages/00_AI분석기.py)
 """
 from core import *   # 공통 모듈 (데이터 로더, 스타일, Solar API 등)
 
-page_setup("역 대 역 · AI 비교 분석실", "🥊")
+page_setup("역 대 역 · AI 비교 분석실", "🥊", highlight_third_metric=False)
 
 st.markdown("## 🥊 역 대 역 — AI 비교 분석실")
 try:
@@ -66,13 +66,25 @@ else:
             fav_data[s_name] = df_s if e_s is None else pd.DataFrame()
     loaded = {k: v for k, v in fav_data.items() if v is not None and not v.empty}
 
-    # KPI: 역별 총 이용객
+    # KPI: 역별 총 이용객 (가장 많은 역만 파란색 하이라이트)
     kpi_cols = st.columns(max(len(fav), 1))
+    totals = {}
     for i, s_name in enumerate(fav):
         df_s = fav_data.get(s_name)
-        total = int(df_s["합계"].sum()) if df_s is not None and not df_s.empty else 0
-        kpi_cols[i].metric(f"🚉 {s_name}", f"{total:,}명" if total else "데이터 없음",
+        totals[s_name] = int(df_s["합계"].sum()) if df_s is not None and not df_s.empty else 0
+        kpi_cols[i].metric(f"🚉 {s_name}",
+                           f"{totals[s_name]:,}명" if totals[s_name] else "데이터 없음",
                            help=f"조회 기간({cmp_label}) 총 이용객")
+    if any(totals.values()):
+        best_idx = max(range(len(fav)), key=lambda i: totals[fav[i]])
+        # 이용객이 가장 많은 카드의 숫자만 파란색으로 강조
+        st.markdown(
+            f"""<style>
+            [data-testid="stHorizontalBlock"] > div:nth-child({best_idx + 1})
+            [data-testid="stMetricValue"] {{color: #2F6BFF;}}
+            </style>""",
+            unsafe_allow_html=True,
+        )
 
     if not loaded:
         st.warning("선택한 기간의 승하차 데이터를 불러오지 못했습니다.")
