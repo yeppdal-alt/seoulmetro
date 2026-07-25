@@ -7,6 +7,7 @@
 - 실행: streamlit run main.py
 """
 import re                              # 문자열에서 괄호 등을 제거할 때 사용
+import math                            # 두 역 사이 거리 계산(하버사인 공식)용
 import datetime as dt                  # 날짜 계산용
 import xml.etree.ElementTree as ET     # XML 응답 해석용
 from urllib.parse import quote         # URL에 한글을 안전하게 넣기 위한 도구
@@ -143,6 +144,16 @@ TIMEOUT = 12
 TREND_DAYS = 7  # 승하차 API가 최근 일주일 데이터만 제공
 
 PLOTLY_TEMPLATE = "plotly_white"
+
+# 지하철 노선별 공식 색상 (지도 마커에 사용)
+LINE_COLORS = {
+    "1호선": "#0052A4", "2호선": "#00A84D", "3호선": "#EF7C1C", "4호선": "#00A5DE",
+    "5호선": "#996CAC", "6호선": "#CD7C2F", "7호선": "#747F00", "8호선": "#E6186C",
+    "9호선": "#BDB092", "경의중앙선": "#77C4A3", "공항철도": "#0090D2",
+    "수인분당선": "#F5A200", "신분당선": "#D4003B", "우이신설선": "#B7C452",
+    "경춘선": "#0C8E72", "서해선": "#8FC31F", "인천1호선": "#7CA8D5",
+    "인천2호선": "#ED8B00", "GTX-A": "#9A6292",
+}
 
 
 # ─────────────────────────────────────────────
@@ -635,17 +646,40 @@ def load_transfer(api_key: str):
 # ─────────────────────────────────────────────
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_congestion(api_key: str, station: str):
-    rows, err = fetch_seoul_with_fallback(api_key, "subwConfusion", "xml", station)
-    if err:
+    """혼잡도(subwConfusion) 조회.
+    데이터가 요일×상하행×역 조합이라 1,000행을 넘으므로 여러 페이지를 수집한다."""
+    # 1) 역명을 추가 파라미터로 지원하는 경우 (한 번에 끝)
+    rows, err = fetch_seoul(api_key, "subwConfusion", "xml", 1, 1000, (station,))
+    if rows:
+        return pd.DataFrame(rows), None
+    # 2) 전체 데이터를 페이지 단위로 수집 (최대 5,000행)
+    all_rows, err = [], None
+    for start in range(1, 5001, 1000):
+        rows, err = fetch_seoul(api_key, "subwConfusion", "xml", start, start + 999)
+        if err or not rows:
+            break
+        all_rows.extend(rows)
+        if len(rows) < 1000:      # 마지막 페이지
+            break
+    if not all_rows:
         return pd.DataFrame(), err
-    return pd.DataFrame(rows), None
+    return pd.DataFrame(all_rows), None
 
 
 def detect_time_cols(df: pd.DataFrame):
-    """'5시30분', 'HR_06', '_0530' 등 시간대 형태 + 숫자값 컬럼 탐지."""
-    pat = re.compile(r"(\d{1,2}\s*시)|(^HR[_]?\d)|(_\d{3,4}$)|(^\d{1,2}:\d{2})", re.I)
+    """'TIME0530', '5시30분', 'HR_06' 등 시간대 형태 + 숫자값 컬럼 탐지."""
+    pat = re.compile(r"(^TIME\d{3,4}$)|(\d{1,2}\s*시)|(^HR[_]?\d)|(_\d{3,4}$)|(^\d{1,2}:\d{2})",
+                     re.I)
     return [c for c in df.columns
             if pat.search(str(c)) and to_num(df[c]).notna().any()]
+
+
+def pretty_time_label(col):
+    """'TIME0530' → '05:30' 처럼 읽기 쉬운 시간 표기로 변환."""
+    m = re.match(r"^TIME(\d{2})(\d{2})$", str(col), re.I)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}"
+    return str(col)
 
 
 # ─────────────────────────────────────────────
@@ -694,16 +728,71 @@ def load_elevator(api_key: str, station: str):
     return pd.DataFrame(rows), None
 
 
-STATION_COL_KWS = ["STTN", "STNS_NM", "STA_NM", "STN_NM", "STATION", "역명", "역사명", "역이름"]
+# 역 '이름' 컬럼 후보 (혼잡도 API의 출발역 컬럼 DPTRE_STTN 포함)
+STATION_COL_KWS = ["DPTRE_STTN", "STTN_NM", "STNS_NM", "STA_NM", "STN_NM",
+                   "STATION", "역명", "역사명", "역이름", "STTN"]
 
 
 def filter_by_station(df: pd.DataFrame, station: str, keywords=STATION_COL_KWS):
     if df.empty:
         return df
-    c = find_col(df.columns, keywords)
+    # 역'번호'·코드 컬럼(STTN_NO 등)은 제외하고 이름 컬럼을 먼저 찾는다
+    name_cols = [c for c in df.columns
+                 if not re.search(r"(no|cd|code)$", str(c).lower())]
+    c = find_col(name_cols, keywords) or find_col(df.columns, keywords)
     if not c:
         return pd.DataFrame()
     return df[df[c].apply(lambda x: station_match(str(x), station))]
+
+
+# ─────────────────────────────────────────────
+# 6) 서울시 역사 마스터 (subwayStationMaster, XML)
+#    출력: BLDN_ID(역사ID), BLDN_NM(역사명), ROUTE(호선), LAT(위도), LOT(경도)
+# ─────────────────────────────────────────────
+def _norm_route(r: str) -> str:
+    """'01호선' → '1호선' 처럼 호선 이름을 표준화."""
+    r = str(r).strip()
+    return re.sub(r"^0(\d)", r"\1", r)
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_station_master(api_key: str):
+    """전체 역의 이름·호선·좌표를 가져온다. 반환 (df, err)."""
+    all_rows, err = [], None
+    for start in (1, 1001):                     # 전체 역사는 1,000건 안팎
+        rows, err = fetch_seoul(api_key, "subwayStationMaster", "xml",
+                                start, start + 999)
+        if err or not rows:
+            break
+        all_rows.extend(rows)
+        if len(rows) < 1000:
+            break
+    if not all_rows:
+        return pd.DataFrame(), err
+    df = pd.DataFrame(all_rows)
+    c_nm = find_col(df.columns, ["BLDN_NM", "역사명", "STTN"])
+    c_route = find_col(df.columns, ["ROUTE", "호선", "LINE"])
+    c_lat = find_col(df.columns, ["LAT", "위도"])
+    c_lot = find_col(df.columns, ["LOT", "LON", "경도"])
+    if not all([c_nm, c_route, c_lat, c_lot]):
+        return pd.DataFrame(), "역사 마스터 컬럼 구조를 인식할 수 없습니다."
+    out = pd.DataFrame({
+        "역명": df[c_nm].astype(str),
+        "호선": df[c_route].astype(str).map(_norm_route),
+        "위도": to_num(df[c_lat]),
+        "경도": to_num(df[c_lot]),
+    }).dropna(subset=["위도", "경도"])
+    return out.reset_index(drop=True), None
+
+
+def haversine_km(lat1, lon1, lat2, lon2):
+    """두 좌표 사이의 거리(km)를 하버사인 공식으로 계산."""
+    R = 6371.0                                   # 지구 반지름(km)
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dp = math.radians(lat2 - lat1)
+    dl = math.radians(lon2 - lon1)
+    a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return R * 2 * math.asin(math.sqrt(a))
 
 
 # ─────────────────────────────────────────────
@@ -715,6 +804,7 @@ keys = {
     "building": get_secret("BUILDING_API_KEY"),
     "busy": get_secret("BUSY_API_KEY"),
     "elevator": get_secret("ELEVATOR_API_KEY"),
+    "map": get_secret("MAP_API_KEY"),          # 역사 마스터(좌표) 조회용
 }
 
 # 조회 가능 날짜 범위
@@ -912,14 +1002,17 @@ if page == "⚖️ 관심역 비교 분석":
                 continue
             bm = bsel.melt(value_vars=tcols, var_name="시간대", value_name="혼잡도")
             bm["혼잡도"] = to_num(bm["혼잡도"])
+            bm["시간대"] = bm["시간대"].map(pretty_time_label)   # TIME0530 → 05:30
             g = (bm.dropna(subset=["혼잡도"])
                  .groupby("시간대", as_index=False)["혼잡도"].mean())
             g["역"] = s_name
-            busy_frames.append(g)
+            busy_frames.append((g, [pretty_time_label(c) for c in tcols]))
     if busy_frames:
-        bfd = pd.concat(busy_frames)
+        bfd = pd.concat([f[0] for f in busy_frames])
+        order = busy_frames[0][1]
         fig = px.line(bfd, x="시간대", y="혼잡도", color="역", markers=True,
-                      template=PLOTLY_TEMPLATE)
+                      template=PLOTLY_TEMPLATE,
+                      category_orders={"시간대": order})
         fig.add_hline(y=100, line_dash="dash", line_color="red",
                       annotation_text="혼잡 기준(100%)")
         fig.update_layout(height=420, margin=dict(t=20, b=10),
@@ -997,9 +1090,9 @@ k4.metric("환승 인원(일)", f"{trans_total:,}명" if trans_total else "데�
 
 st.divider()
 
-tab_ride, tab_trans, tab_busy, tab_bld, tab_elev, tab_ai = st.tabs(
-    ["🚏 승하차 분석", "🔄 환승 인원", "📈 혼잡도", "🏗️ 역사 건축 현황",
-     "♿ 승강기·교통약자 시설", "🤖 AI 도우미"]
+tab_ride, tab_trans, tab_busy, tab_map, tab_bld, tab_elev, tab_ai = st.tabs(
+    ["🚏 승하차 분석", "🔄 환승 인원", "📈 혼잡도", "🗺️ 주변 역 지도",
+     "🏗️ 역사 건축 현황", "♿ 승강기·교통약자 시설", "🤖 AI 도우미"]
 )
 
 # ── 탭1: 승하차 ──
@@ -1144,15 +1237,25 @@ with tab_busy:
         time_cols = detect_time_cols(target)
         if time_cols:
             st.subheader("시간대별 혼잡도")
-            meta_cols = [c for c in target.columns if c not in time_cols]
-            label_col = find_col(meta_cols, ["UPDN", "방향", "DRCT", "요일", "DAY", "호선", "LINE"])
+            # 요일(DOW_SE)·상하행(UP_DOWN_SE)을 합쳐 선(line) 구분 라벨로 사용
+            target = target.copy()
+            label_parts = [c for c in target.columns
+                           if find_col([c], ["DOW", "요일", "UP_DOWN", "UPDN", "방향", "DRCT"])]
+            if label_parts:
+                target["구분"] = target[label_parts].astype(str).agg(" · ".join, axis=1)
+                label_col = "구분"
+            else:
+                label_col = None
             m = target.melt(id_vars=[label_col] if label_col else None,
                             value_vars=time_cols, var_name="시간대", value_name="혼잡도")
             m["혼잡도"] = to_num(m["혼잡도"])
             m = m.dropna(subset=["혼잡도"])
+            m["시간대"] = m["시간대"].map(pretty_time_label)   # TIME0530 → 05:30
+            order = [pretty_time_label(c) for c in time_cols]
             fig = px.line(m, x="시간대", y="혼잡도",
                           color=label_col if label_col else None,
-                          markers=True, template=PLOTLY_TEMPLATE)
+                          markers=True, template=PLOTLY_TEMPLATE,
+                          category_orders={"시간대": order})
             fig.add_hline(y=100, line_dash="dash", line_color="red",
                           annotation_text="혼잡 기준(100%)")
             fig.update_layout(height=420, margin=dict(t=20, b=10),
@@ -1160,6 +1263,87 @@ with tab_busy:
             st.plotly_chart(fig, use_container_width=True)
         st.subheader("원본 데이터")
         st.dataframe(target.head(300), use_container_width=True, hide_index=True)
+
+# ── 탭: 주변 역 지도 + 혼잡도 비교 ──
+with tab_map:
+    with st.spinner("역 좌표 데이터 로딩 중..."):
+        master, m_err = load_station_master(keys["map"])
+    if m_err:
+        st.warning(f"역사 마스터 API: {m_err}")
+        st.caption("Secrets에 MAP_API_KEY(서울열린데이터광장 인증키)를 등록해 주세요.")
+    elif master.empty:
+        st.info("역 좌표 데이터가 없습니다.")
+    else:
+        sel_rows = master[master["역명"].apply(lambda x: station_match(x, station))]
+        if sel_rows.empty:
+            st.info(f"'{station}' 역의 좌표를 찾지 못했습니다.")
+        else:
+            # 선택 역의 대표 좌표 (환승역은 호선별 좌표의 평균)
+            lat0, lon0 = float(sel_rows["위도"].mean()), float(sel_rows["경도"].mean())
+            radius = st.slider("주변 역 탐색 반경 (km)", 0.5, 3.0, 1.5, 0.5)
+
+            # 모든 역까지의 거리 계산 → 반경 안의 역만 추리기
+            near = master.copy()
+            near["거리(km)"] = near.apply(
+                lambda r: haversine_km(lat0, lon0, r["위도"], r["경도"]), axis=1)
+            near = near[near["거리(km)"] <= radius].sort_values("거리(km)")
+
+            # ── 지도: 호선별 색상 마커 + 역명 라벨 ──
+            st.subheader(f"🗺️ {station} 주변 {radius}km 역 지도")
+            fig = px.scatter_mapbox(
+                near, lat="위도", lon="경도", color="호선", text="역명",
+                hover_name="역명",
+                hover_data={"호선": True, "거리(km)": ":.2f", "위도": False, "경도": False},
+                color_discrete_map=LINE_COLORS, zoom=13.3, height=520)
+            fig.update_traces(marker=dict(size=13), textposition="top center",
+                              textfont=dict(size=11, color="#0F3D6E"))
+            # 선택한 역은 큰 별도 마커로 강조
+            fig.add_trace(go.Scattermapbox(
+                lat=[lat0], lon=[lon0], mode="markers",
+                marker=dict(size=22, color="#FF5C8A"), name=f"⭐ {station}"))
+            fig.update_layout(mapbox_style="open-street-map",
+                              margin=dict(t=0, b=0, l=0, r=0),
+                              legend=dict(orientation="h", y=-0.04))
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ── 주변 역 목록 (호선 묶음 + 거리) ──
+            info = (near.groupby("역명")
+                    .agg(호선=("호선", lambda s: ", ".join(sorted(set(s)))),
+                         거리km=("거리(km)", "min"))
+                    .reset_index().sort_values("거리km"))
+            info["거리km"] = info["거리km"].round(2)
+            st.dataframe(info, use_container_width=True, hide_index=True)
+
+            # ── 주변 역 혼잡도 한눈에 비교 (히트맵) ──
+            st.subheader("🔥 주변 역 혼잡도 비교")
+            near_names = info["역명"].head(6).tolist()   # 가까운 순 최대 6곳
+            heat_rows, time_order = [], None
+            with st.spinner("주변 역 혼잡도 수집 중..."):
+                for nm in near_names:
+                    bdf, berr = load_congestion(keys["busy"], nm)
+                    if berr or bdf is None or bdf.empty:
+                        continue
+                    bsel = filter_by_station(bdf, nm)
+                    if bsel.empty:
+                        continue
+                    tcols = detect_time_cols(bsel)
+                    if not tcols:
+                        continue
+                    # 요일·상하행을 평균 내서 역별 시간대 혼잡도 한 줄로
+                    vals = bsel[tcols].apply(to_num).mean()
+                    labels = [pretty_time_label(c) for c in tcols]
+                    heat_rows.append(pd.Series(vals.values, index=labels, name=nm))
+                    time_order = labels
+            if heat_rows:
+                hm = pd.DataFrame(heat_rows)
+                hm = hm[[c for c in time_order if c in hm.columns]]
+                fig = px.imshow(hm, aspect="auto", color_continuous_scale="YlOrRd",
+                                labels=dict(x="시간대", y="역", color="혼잡도(%)"))
+                fig.update_layout(height=120 + 46 * len(hm), margin=dict(t=20, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption("색이 진할수록 혼잡 (요일·상하행 평균, 100% = 정원 기준 만석)")
+            else:
+                st.info("주변 역의 혼잡도 데이터를 불러오지 못했습니다. (BUSY_API_KEY 필요)")
 
 # ── 탭4: 역사 건축 현황 ──
 with tab_bld:
