@@ -27,11 +27,18 @@ page = st.radio("페이지",
                 horizontal=True, label_visibility="collapsed")
 
 # 별도 페이지로 분리된 기능 바로가기
+# (배포 환경에서 페이지를 못 찾아도 앱이 죽지 않게 예외 처리)
+def safe_page_link(path, label):
+    try:
+        st.page_link(path, label=label)
+    except Exception:
+        st.caption(f"{label} → 왼쪽 사이드바(＞ 버튼)에서 열 수 있어요.")
+
 nav1, nav2, _nav = st.columns([1.2, 1, 1.8])
 with nav1:
-    st.page_link("pages/00_AI분석기.py", label="🤖 AI 분석 (관심역 비교·도우미)")
+    safe_page_link("pages/00_AI분석기.py", "🤖 AI 분석 (관심역 비교·도우미)")
 with nav2:
-    st.page_link("pages/01_예측도우미.py", label="🔮 예측 도우미")
+    safe_page_link("pages/01_예측도우미.py", "🔮 예측 도우미")
 
 # 역 목록 확보 (API 스냅샷 → 실패 시 첨부 CSV)
 with st.spinner("역 목록 로딩 중..."):
