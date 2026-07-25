@@ -6,15 +6,18 @@
 """
 from core import *   # 공통 모듈 (데이터 로더, 스타일, Solar API 등)
 
-page_setup("예측 도우미 · 서울교통공사 대시보드", "🔮")
+page_setup("휴가 타이밍 예측기", "🏖️")
 
-st.markdown("## 🔮 휴가 요일 추천 AI")
-st.page_link("main.py", label="⬅️ 메인 대시보드로 돌아가기")
+st.markdown("## 🏖️ 휴가 타이밍 예측기 — 언제 쉬면 꿀맛일까?")
+try:
+    st.page_link("main.py", label="⬅️ 메인 대시보드로 돌아가기")
+except Exception:
+    st.caption("⬅️ 메인 대시보드는 왼쪽 사이드바에서 열 수 있어요.")
 
 st.markdown(
     """
     <div class="hero">
-      <div class="hero-title">🔮 어느 요일에 휴가를 낼까?</div>
+      <div class="hero-title">🏖️ 언제 쉬면 꿀맛일까?</div>
       <div class="hero-sub">자주 이용하는 역의 요일별 이용 패턴과 혼잡도를 분석해,
       지하철이 한산한 '휴가 내기 좋은 요일'을 AI가 추천해 드립니다</div>
     </div>
@@ -72,7 +75,7 @@ st.subheader(f"📊 {station}역 요일별 하루 평균 이용객 (2025년)")
 wk["구분"] = wk["요일"].apply(lambda d: "가장 한산한 평일" if d == best_day else "그 외")
 fig = px.bar(wk, x="요일", y="평균 이용객", color="구분",
              template=PLOTLY_TEMPLATE,
-             color_discrete_map={"가장 한산한 평일": "#00A84D", "그 외": "#C9DCF0"},
+             color_discrete_map={"가장 한산한 평일": "#2F6BFF", "그 외": "#D8E0EA"},
              category_orders={"요일": WEEKDAYS})
 fig.update_layout(height=380, margin=dict(t=20, b=10), showlegend=False)
 show_chart(fig)
