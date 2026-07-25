@@ -30,7 +30,7 @@ st.set_page_config(
     page_title="서울교통공사 역 분석 대시보드",
     page_icon="🚇",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",  # 사이드바 없이 한 화면으로 구성
 )
 
 # ── 화면을 세련되게 꾸미는 CSS (색·글꼴·카드 모양 등) ──
@@ -406,16 +406,27 @@ def load_riders_raw(api_key: str, pasng_ymd: str = "", stn_nm: str = "",
     return _standardize_riders(pd.DataFrame(all_rows))
 
 
-def load_ridership(api_key: str, date_str: str, station: str = ""):
-    """선택 날짜(+역) 기준 데이터. stnNm은 '포함' 검색이므로 재필터. 반환 (df, err, note)."""
-    df, err = load_riders_raw(api_key, date_str, station)
-    if err:
-        return pd.DataFrame(), err, None
-    if df.empty:
-        return df, None, "해당 날짜의 데이터가 없습니다. 이 API는 최근 일주일 데이터만 제공합니다."
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_ridership_period(api_key: str, date_strs: tuple, station: str = ""):
+    """여러 날짜(일별/월별/기간)를 합쳐서 조회. stnNm은 '포함' 검색이므로 재필터.
+    반환 (df, err, note)."""
+    frames, first_err = [], None
+    for ds in date_strs:
+        df, e = load_riders_raw(api_key, ds, station)
+        if e:
+            first_err = first_err or e   # 첫 에러만 기억
+            continue
+        if df is not None and not df.empty:
+            frames.append(df)
+    if not frames:
+        if first_err:
+            return pd.DataFrame(), first_err, None
+        return (pd.DataFrame(), None,
+                "조회 기간에 데이터가 없습니다. (승하차 API는 최근 일주일 데이터만 제공)")
+    out = pd.concat(frames, ignore_index=True)
     if station:
-        df = df[df["역명"].apply(lambda x: station_match(x, station))]
-    return df.reset_index(drop=True), None, None
+        out = out[out["역명"].apply(lambda x: station_match(x, station))]
+    return out.reset_index(drop=True), None, None
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -535,76 +546,121 @@ def filter_by_station(df: pd.DataFrame, station: str, keywords=STATION_COL_KWS):
 
 
 # ─────────────────────────────────────────────
-# 사이드바
+# 상단 컨트롤 (역 검색 → 조회 방식) : 좌우 구분 없이 한 화면
 # ─────────────────────────────────────────────
-with st.sidebar:
-    st.title("🚇 역 분석 대시보드")
-    st.caption("서울교통공사 · 열린데이터광장 API 기반")
+keys = {
+    "riders": get_secret("RIDERS_API_KEY"),
+    "transfer": get_secret("TRANSFER_API_KEY"),
+    "building": get_secret("BUILDING_API_KEY"),
+    "busy": get_secret("BUSY_API_KEY"),
+    "elevator": get_secret("ELEVATOR_API_KEY"),
+}
 
-    keys = {
-        "riders": get_secret("RIDERS_API_KEY"),
-        "transfer": get_secret("TRANSFER_API_KEY"),
-        "building": get_secret("BUILDING_API_KEY"),
-        "busy": get_secret("BUSY_API_KEY"),
-        "elevator": get_secret("ELEVATOR_API_KEY"),
-    }
+# 승하차 API가 제공하는 날짜 범위: 최근 일주일 (어제 ~ 7일 전)
+TODAY = dt.date.today()
+MIN_DAY = TODAY - dt.timedelta(days=7)
+MAX_DAY = TODAY - dt.timedelta(days=1)
 
-    base_date = st.date_input(
-        "기준 날짜 (승하차 통계)",
-        value=dt.date.today() - dt.timedelta(days=1),
-        min_value=dt.date.today() - dt.timedelta(days=7),
-        max_value=dt.date.today() - dt.timedelta(days=1),
-        help="승하차 통계(통행일자)는 최근 일주일 데이터만 제공됩니다.",
-    )
-    date_str = base_date.strftime("%Y%m%d")
+st.markdown("## 🚇 서울교통공사 역 분석 대시보드")
 
-    with st.spinner("역 목록 로딩 중..."):
-        rid_df, rid_err = load_station_list(keys["riders"], date_str)
+# ── 1) 역 검색 (최상단) ──
+col_search, col_select = st.columns([1, 1.6])
+with st.spinner("역 목록 로딩 중..."):
+    rid_df, rid_err = load_station_list(keys["riders"], MAX_DAY.strftime("%Y%m%d"))
 
-    if not rid_df.empty:
-        stations = sorted(rid_df["역명"].unique().tolist())
-        search = st.text_input("역 검색", placeholder="예: 강남, 시청, 왕십리")
-        filtered = ([s for s in stations if norm_station(search) in norm_station(s)]
-                    if search else stations)
-        if not filtered:
-            st.warning("검색 결과가 없습니다. 전체 목록을 표시합니다.")
-            filtered = stations
-        default_idx = filtered.index("강남") if "강남" in filtered else 0
-        station = st.selectbox("역 선택", filtered, index=default_idx)
+if not rid_df.empty:
+    stations = sorted(rid_df["역명"].unique().tolist())
+    search = col_search.text_input("🔍 역 검색", placeholder="예: 강남, 시청, 왕십리")
+    filtered = ([s for s in stations if norm_station(search) in norm_station(s)]
+                if search else stations)
+    if not filtered:
+        col_search.warning("검색 결과가 없어 전체 목록을 표시합니다.")
+        filtered = stations
+    default_idx = filtered.index("강남") if "강남" in filtered else 0
+    station = col_select.selectbox("역 선택", filtered, index=default_idx)
+else:
+    station = col_search.text_input("🔍 역명 직접 입력", value="강남")
+    if rid_err:
+        st.error(f"승하차 API: {rid_err}")
+
+# ── 2) 조회 방식: 일별 / 월별 / 기간 설정 ──
+mode = st.radio("조회 방식", ["일별", "월별", "기간 설정"], horizontal=True)
+
+date_list = []          # 조회할 날짜들(dt.date 리스트)
+period_label = ""       # 화면에 보여줄 기간 문구
+
+if mode == "일별":
+    d = st.date_input("날짜", value=MAX_DAY, min_value=MIN_DAY, max_value=MAX_DAY)
+    date_list = [d]
+    period_label = d.strftime("%Y-%m-%d")
+
+elif mode == "월별":
+    # 이번 달 / 지난 달 중 선택 → 그 달의 날짜 중 API 제공 범위와 겹치는 날만 조회
+    cur_first = MAX_DAY.replace(day=1)
+    prev_first = (cur_first - dt.timedelta(days=1)).replace(day=1)
+    month_sel = st.selectbox("월 선택",
+                             [cur_first.strftime("%Y-%m"), prev_first.strftime("%Y-%m")])
+    y, m = map(int, month_sel.split("-"))
+    d0 = dt.date(y, m, 1)
+    d1 = (dt.date(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
+          - dt.timedelta(days=1))                      # 그 달의 마지막 날
+    s, e = max(d0, MIN_DAY), min(d1, MAX_DAY)          # 제공 범위와 교집합
+    if s <= e:
+        date_list = [s + dt.timedelta(days=i) for i in range((e - s).days + 1)]
+    period_label = month_sel
+
+else:  # 기간 설정
+    rng = st.date_input("기간 (시작 ~ 종료)", value=(MIN_DAY, MAX_DAY),
+                        min_value=MIN_DAY, max_value=MAX_DAY)
+    # 날짜를 고르는 중에는 값이 1개만 들어올 수 있어 안전하게 처리
+    if isinstance(rng, (tuple, list)):
+        if len(rng) == 2:
+            s, e = rng
+        elif len(rng) == 1:
+            s = e = rng[0]
+        else:
+            s = e = MAX_DAY
     else:
-        station = st.text_input("역명 직접 입력", value="강남")
-        if rid_err:
-            st.error(f"승하차 API: {rid_err}")
+        s = e = rng
+    date_list = [s + dt.timedelta(days=i) for i in range((e - s).days + 1)]
+    period_label = f"{s.strftime('%Y-%m-%d')} ~ {e.strftime('%Y-%m-%d')}"
 
-    with st.expander("🔑 API 키 설정 상태"):
-        labels = {
-            "riders": "승하차 (RIDERS_API_KEY · 공공데이터포털)",
-            "transfer": "환승 (TRANSFER_API_KEY)",
-            "building": "건축 (BUILDING_API_KEY)",
-            "busy": "혼잡도 (BUSY_API_KEY)",
-            "elevator": "승강기 (ELEVATOR_API_KEY)",
-        }
-        for k, label in labels.items():
-            st.write(("✅ " if keys[k] else "❌ ") + label)
-        st.caption("보안을 위해 키 값 자체는 표시되지 않습니다.")
+st.caption("ℹ️ 승하차 API는 **최근 일주일** 데이터만 제공합니다. 그 이전 날짜는 조회 범위에서 제외돼요.")
+
+with st.expander("🔑 API 키 설정 상태"):
+    labels = {
+        "riders": "승하차 (RIDERS_API_KEY · 공공데이터포털)",
+        "transfer": "환승 (TRANSFER_API_KEY)",
+        "building": "건축 (BUILDING_API_KEY)",
+        "busy": "혼잡도 (BUSY_API_KEY)",
+        "elevator": "승강기 (ELEVATOR_API_KEY)",
+    }
+    for k, label in labels.items():
+        st.write(("✅ " if keys[k] else "❌ ") + label)
+    st.caption("보안을 위해 키 값 자체는 표시되지 않습니다.")
+
+# 추이 그래프 등에서 쓰는 기준일 = 조회 기간의 마지막 날
+base_date = date_list[-1] if date_list else MAX_DAY
 
 # ─────────────────────────────────────────────
 # 메인
 # ─────────────────────────────────────────────
-# ── 상단 히어로 배너 (선택한 역 이름 + 기준일) ──
+# ── 상단 히어로 배너 (선택한 역 이름 + 조회 기간) ──
 st.markdown(
     f"""
     <div class="hero">
       <div class="hero-title">🚇 {station} <span>역 종합 현황</span></div>
-      <div class="hero-sub">기준일 {base_date.strftime('%Y-%m-%d')} ·
+      <div class="hero-sub">조회 기간 {period_label} ({mode}) ·
       서울열린데이터광장 / 공공데이터포털 데이터</div>
     </div>
     """,
     unsafe_allow_html=True,
 )
 
+# 선택한 기간의 날짜들을 문자열(YYYYMMDD) 묶음으로 변환해 조회
+ds_tuple = tuple(d.strftime("%Y%m%d") for d in date_list)
 with st.spinner("선택 역 승하차 데이터 로딩 중..."):
-    sel, sel_err, sel_note = load_ridership(keys["riders"], date_str, station)
+    sel, sel_err, sel_note = load_ridership_period(keys["riders"], ds_tuple, station)
 if sel_note:
     st.info(sel_note)
 
@@ -665,9 +721,18 @@ with tab_ride:
                               legend=dict(orientation="h", y=1.1))
             st.plotly_chart(fig, use_container_width=True)
         with c2:
-            st.subheader(f"최근 {TREND_DAYS}일 이용 추이")
-            with st.spinner("추이 데이터 수집 중..."):
-                trend = load_trend(keys["riders"], base_date, station)
+            # 기간/월별 조회면 이미 받아온 데이터로 일별 추이를 그리고,
+            # 일별 조회면 최근 7일 추이를 따로 수집해서 보여준다
+            if "날짜" in sel.columns and sel["날짜"].nunique() > 1:
+                st.subheader("일별 이용 추이 (조회 기간)")
+                g = (sel.groupby("날짜")[["승차", "하차"]].sum()
+                     .reset_index().sort_values("날짜"))
+                g["날짜"] = pd.to_datetime(g["날짜"], format="%Y%m%d", errors="coerce")
+                trend = g.dropna(subset=["날짜"])
+            else:
+                st.subheader(f"최근 {TREND_DAYS}일 이용 추이")
+                with st.spinner("추이 데이터 수집 중..."):
+                    trend = load_trend(keys["riders"], base_date, station)
             if trend.empty:
                 st.info("추이 데이터를 불러올 수 없습니다.")
             else:
