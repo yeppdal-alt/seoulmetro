@@ -208,8 +208,20 @@ if page == "🗺️ 주변 역 지도":
     st.stop()   # 이 페이지는 여기서 끝
 
 
-# ── 2) 조회 방식: 일별 / 월별 / 기간 설정 ──
-mode, date_list, period_label = select_period("main")
+# ── 2) 조회 기간: 일별 / 최근 일주일 누적 (실시간 API 제공 범위에 맞춤) ──
+mode = st.radio("조회 기간", ["일별", "최근 일주일 누적"],
+                horizontal=True, key="main_mode")
+if mode == "일별":
+    d = st.date_input("날짜", value=MAX_DAY,
+                      min_value=API_MIN, max_value=MAX_DAY, key="main_day")
+    date_list = [d]
+    period_label = d.strftime("%Y-%m-%d")
+else:
+    # 최근 일주일(7일 전 ~ 어제)을 모두 합산해서 보여준다
+    date_list = [API_MIN + dt.timedelta(days=i)
+                 for i in range((MAX_DAY - API_MIN).days + 1)]
+    period_label = f"최근 일주일 ({API_MIN.strftime('%m.%d')} ~ {MAX_DAY.strftime('%m.%d')})"
+st.caption("ℹ️ 승하차 통계는 최근 일주일 데이터가 제공됩니다.")
 
 # 추이 그래프 등에서 쓰는 기준일 = 조회 기간의 마지막 날
 base_date = date_list[-1] if date_list else MAX_DAY
@@ -272,7 +284,7 @@ with tab_ride:
             fig.add_trace(go.Bar(x=hourly["시간"], y=hourly["승차"], name="승차",
                                  marker_color="#2F6BFF"))
             fig.add_trace(go.Bar(x=hourly["시간"], y=hourly["하차"], name="하차",
-                                 marker_color="#0F172A"))
+                                 marker_color="#93C5FD"))
             fig.update_layout(template=PLOTLY_TEMPLATE, barmode="group", height=380,
                               xaxis_title="시간대(시)", yaxis_title="인원(명)",
                               margin=dict(t=20, b=10),
@@ -287,7 +299,7 @@ with tab_ride:
                        var_name="구분", value_name="인원"))
             fig = px.bar(m, x="호선", y="인원", color="구분", barmode="group",
                          template=PLOTLY_TEMPLATE,
-                         color_discrete_map={"승차": "#2F6BFF", "하차": "#0F172A"})
+                         color_discrete_map={"승차": "#2F6BFF", "하차": "#93C5FD"})
             fig.update_layout(height=360, margin=dict(t=20, b=10),
                               legend=dict(orientation="h", y=1.1))
             show_chart(fig)
@@ -313,7 +325,7 @@ with tab_ride:
                                          line=dict(color="#2F6BFF", width=3)))
                 fig.add_trace(go.Scatter(x=trend["날짜"], y=trend["하차"], name="하차",
                                          mode="lines+markers",
-                                         line=dict(color="#0F172A", width=3)))
+                                         line=dict(color="#93C5FD", width=3)))
                 fig.update_layout(template=PLOTLY_TEMPLATE, height=360,
                                   margin=dict(t=20, b=10),
                                   legend=dict(orientation="h", y=1.1))
@@ -449,7 +461,7 @@ with tab_elev:
                     cnt.columns = ["상태", "대수"]
                     fig = px.bar(cnt, x="상태", y="대수", color="상태",
                                  template=PLOTLY_TEMPLATE,
-                                 color_discrete_sequence=["#00A84D", "#0F172A", "#D8E0EA"])
+                                 color_discrete_sequence=["#00A84D", "#2F6BFF", "#D8E0EA"])
                     fig.update_layout(height=340, margin=dict(t=20, b=10),
                                       showlegend=False)
                     show_chart(fig)
