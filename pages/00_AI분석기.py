@@ -36,8 +36,21 @@ default_fav = [s for s in ("강남", "잠실", "홍대입구") if s in stations]
 fav = st.multiselect("관심역 선택 (최대 3곳)", stations, default=default_fav,
                      max_selections=3, key="fav_stations")
 
-# 조회 기간 선택 (일별/월별/기간)
-cmp_mode, cmp_dates, cmp_label = select_period("cmp")
+# 조회 기간: 일별 / 최근 일주일 누적 (메인 페이지와 동일한 방식)
+_, MAX_DAY, API_MIN = date_bounds()
+cmp_mode = st.radio("조회 기간", ["일별", "최근 일주일 누적"],
+                    horizontal=True, key="cmp_mode")
+if cmp_mode == "일별":
+    _d = st.date_input("날짜", value=MAX_DAY,
+                       min_value=API_MIN, max_value=MAX_DAY, key="cmp_day")
+    cmp_dates = [_d]
+    cmp_label = _d.strftime("%Y-%m-%d")
+else:
+    # 최근 일주일(7일 전 ~ 어제)을 모두 합산해서 비교
+    cmp_dates = [API_MIN + dt.timedelta(days=i)
+                 for i in range((MAX_DAY - API_MIN).days + 1)]
+    cmp_label = f"최근 일주일 ({API_MIN.strftime('%m.%d')} ~ {MAX_DAY.strftime('%m.%d')})"
+st.caption("ℹ️ 승하차 통계는 최근 일주일 데이터가 제공됩니다.")
 
 if not fav:
     st.info("비교할 역을 1곳 이상 선택해 주세요.")
