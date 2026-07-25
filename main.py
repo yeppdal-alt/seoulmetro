@@ -19,7 +19,7 @@ keys = get_keys()          # 모든 API 키 (core.py에서 로드)
 # 조회 가능 날짜 범위 (2025년 CSV 시작일 ~ 어제)
 MIN_DAY, MAX_DAY, API_MIN = date_bounds()
 
-st.markdown("## 🚇 서울교통공사 역 분석 대시보드")
+st.markdown("## 🚇 지하철 인사이트 랩 — 우리 역, 얼마나 붐빌까?")
 
 # ── 페이지 선택: 역 종합 현황 / 관심역 비교 분석 ──
 page = st.radio("페이지",
@@ -36,9 +36,9 @@ def safe_page_link(path, label):
 
 nav1, nav2, _nav = st.columns([1.2, 1, 1.8])
 with nav1:
-    safe_page_link("pages/00_AI분석기.py", "🤖 AI 분석 (관심역 비교·도우미)")
+    safe_page_link("pages/00_AI분석기.py", "🥊 역 대 역 — AI 비교 분석실")
 with nav2:
-    safe_page_link("pages/01_예측도우미.py", "🔮 예측 도우미")
+    safe_page_link("pages/01_예측도우미.py", "🏖️ 휴가 타이밍 예측기")
 
 # 역 목록 확보 (API 스냅샷 → 실패 시 첨부 CSV)
 with st.spinner("역 목록 로딩 중..."):
@@ -155,11 +155,11 @@ if page == "🗺️ 주변 역 지도":
                 hover_data={"호선": True, "거리(km)": ":.2f", "위도": False, "경도": False},
                 color_discrete_map=LINE_COLORS, zoom=13.3, height=520)
             fig.update_traces(marker=dict(size=13), textposition="top center",
-                              textfont=dict(size=11, color="#0F3D6E"))
+                              textfont=dict(size=11, color="#0F172A"))
             # 선택한 역은 큰 별도 마커로 강조
             fig.add_trace(go.Scattermapbox(
                 lat=[lat0], lon=[lon0], mode="markers",
-                marker=dict(size=22, color="#FF5C8A"), name=f"⭐ {station}"))
+                marker=dict(size=22, color="#0F172A"), name=f"⭐ {station}"))
             fig.update_layout(mapbox_style="open-street-map",
                               margin=dict(t=0, b=0, l=0, r=0),
                               legend=dict(orientation="h", y=-0.04))
@@ -270,9 +270,9 @@ with tab_ride:
                       .sort_values("시간"))
             fig = go.Figure()
             fig.add_trace(go.Bar(x=hourly["시간"], y=hourly["승차"], name="승차",
-                                 marker_color="#3B9DF8"))
+                                 marker_color="#2F6BFF"))
             fig.add_trace(go.Bar(x=hourly["시간"], y=hourly["하차"], name="하차",
-                                 marker_color="#FF7E9D"))
+                                 marker_color="#0F172A"))
             fig.update_layout(template=PLOTLY_TEMPLATE, barmode="group", height=380,
                               xaxis_title="시간대(시)", yaxis_title="인원(명)",
                               margin=dict(t=20, b=10),
@@ -287,7 +287,7 @@ with tab_ride:
                        var_name="구분", value_name="인원"))
             fig = px.bar(m, x="호선", y="인원", color="구분", barmode="group",
                          template=PLOTLY_TEMPLATE,
-                         color_discrete_map={"승차": "#3B9DF8", "하차": "#FF7E9D"})
+                         color_discrete_map={"승차": "#2F6BFF", "하차": "#0F172A"})
             fig.update_layout(height=360, margin=dict(t=20, b=10),
                               legend=dict(orientation="h", y=1.1))
             show_chart(fig)
@@ -310,10 +310,10 @@ with tab_ride:
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(x=trend["날짜"], y=trend["승차"], name="승차",
                                          mode="lines+markers",
-                                         line=dict(color="#3B9DF8", width=3)))
+                                         line=dict(color="#2F6BFF", width=3)))
                 fig.add_trace(go.Scatter(x=trend["날짜"], y=trend["하차"], name="하차",
                                          mode="lines+markers",
-                                         line=dict(color="#FF7E9D", width=3)))
+                                         line=dict(color="#0F172A", width=3)))
                 fig.update_layout(template=PLOTLY_TEMPLATE, height=360,
                                   margin=dict(t=20, b=10),
                                   legend=dict(orientation="h", y=1.1))
@@ -334,7 +334,7 @@ with tab_ride:
         fig = px.bar(top, x="합계", y="역명", orientation="h", color="선택",
                      template=PLOTLY_TEMPLATE,
                      labels={"합계": "총 이용객(명)"},
-                     color_discrete_map={"선택 역": "#FF5C8A", "기타": "#C9DCF0"})
+                     color_discrete_map={"선택 역": "#2F6BFF", "기타": "#D8E0EA"})
         fig.update_layout(height=560, yaxis=dict(autorange="reversed"),
                           margin=dict(t=20, b=10), showlegend=False)
         show_chart(fig)
@@ -377,7 +377,7 @@ with tab_trans:
             fig = px.bar(rank, x="_합계", y=c_stn, orientation="h", color="선택",
                          template=PLOTLY_TEMPLATE,
                          labels={"_합계": "환승 인원(명)", c_stn: "역명"},
-                         color_discrete_map={"선택 역": "#FF5C8A", "기타": "#C9DCF0"})
+                         color_discrete_map={"선택 역": "#2F6BFF", "기타": "#D8E0EA"})
             fig.update_layout(height=480, yaxis=dict(autorange="reversed"),
                               margin=dict(t=20, b=10), showlegend=False)
             show_chart(fig)
@@ -449,7 +449,7 @@ with tab_elev:
                     cnt.columns = ["상태", "대수"]
                     fig = px.bar(cnt, x="상태", y="대수", color="상태",
                                  template=PLOTLY_TEMPLATE,
-                                 color_discrete_sequence=["#00A84D", "#FF7E9D", "#C9DCF0"])
+                                 color_discrete_sequence=["#00A84D", "#0F172A", "#D8E0EA"])
                     fig.update_layout(height=340, margin=dict(t=20, b=10),
                                       showlegend=False)
                     show_chart(fig)
