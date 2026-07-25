@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-AI 분석 페이지 (pages/00_AI분석.py)
+AI 분석 페이지 (pages/00_AI분석기.py)
 - 위: 관심역 비교 분석 (최대 3곳 나란히 비교)
 - 아래: AI 분석 도우미 채팅 (Upstage Solar, solar-open2)
 """
