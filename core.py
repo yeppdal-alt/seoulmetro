@@ -26,7 +26,7 @@ SOLAR_BASE_URL = "https://api.upstage.ai/v1"
 SOLAR_MODEL = "solar-open2"            # 모델 이름은 글자 그대로 사용
 
 
-def page_setup(title="서울교통공사 역 분석 대시보드", icon="🚇"):
+def page_setup(title="지하철 인사이트 랩 · 서울교통공사", icon="🚇"):
     """각 페이지 첫머리에서 호출: 페이지 설정 + 공통 CSS 적용."""
     st.set_page_config(page_title=title, page_icon=icon, layout="wide",
                        initial_sidebar_state="auto")  # 사이드바에 페이지 목록 표시
@@ -34,114 +34,128 @@ def page_setup(title="서울교통공사 역 분석 대시보드", icon="🚇"):
 
 
 def _apply_css():
-    # ── 화면을 세련되게 꾸미는 CSS (소프트 스카이블루 톤, 흰색 라운드 카드) ──
+    # ── 모던 모바일 앱 스타일 CSS (비비드 블루 · 블랙 · 화이트 카드) ──
     st.markdown(
         """
         <style>
-        /* 한국어에 잘 어울리는 Pretendard 글꼴 불러오기 */
+        /* 한국어에 잘 어울리는 Pretendard 글꼴 */
         @import url('https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css');
         html, body, [class*="css"] {font-family: 'Pretendard', sans-serif;}
 
-        /* 전체 배경: 아주 연한 하늘색 그라데이션 */
-        .stApp {
-            background: linear-gradient(180deg, #EAF3FF 0%, #F5FAFF 45%, #F2F8FF 100%);
-        }
-        /* 스트림릿 기본 상단바를 투명하게 → 배경과 자연스럽게 연결 */
+        /* 전체 배경: 밝은 회백색 (카드가 떠 보이게) */
+        .stApp {background: #F1F4F9;}
         [data-testid="stHeader"] {background: transparent;}
 
-        /* 상단 여백을 넉넉히 → 제목 글자가 짤리지 않게 */
+        /* 상단 여백 넉넉히 → 제목이 짤리지 않게 */
         .block-container {padding-top: 3rem; padding-bottom: 2.5rem; max-width: 1150px;}
 
-        /* 제목 계열 글자색: 짙은 네이비 */
-        h1, h2, h3 {color: #0F3D6E !important; letter-spacing: -0.4px;}
+        /* 제목: 굵고 진한 잉크색 */
+        h1, h2, h3 {color: #0F172A !important; letter-spacing: -0.5px; font-weight: 800 !important;}
 
-        /* 상단 히어로 배너: 밝은 하늘색 카드 + 어두운 글자 */
+        /* 히어로 배너: 비비드 블루 카드 + 흰 글자 */
         .hero {
-            background: linear-gradient(120deg, #CFE6FF 0%, #E4F0FF 55%, #F2F8FF 100%);
-            border: 1px solid #FFFFFF;
-            border-radius: 24px; padding: 26px 30px; margin: 6px 0 10px 0;
-            box-shadow: 0 12px 30px rgba(59, 157, 248, 0.16);
+            background: linear-gradient(135deg, #2F6BFF 0%, #4F8DFF 70%, #6BA4FF 100%);
+            border: none; border-radius: 28px; padding: 30px 34px; margin: 8px 0 14px 0;
+            box-shadow: 0 16px 36px rgba(47, 107, 255, 0.30);
         }
-        .hero-title {font-size: 1.9rem; font-weight: 800; color: #0F3D6E; letter-spacing: -0.5px;}
-        .hero-title span {font-weight: 500; color: #3D6C9E;}
-        .hero-sub {margin-top: 6px; font-size: 0.9rem; color: #5B7FA6;}
+        .hero-title {font-size: 2rem; font-weight: 800; color: #FFFFFF; letter-spacing: -0.6px;}
+        .hero-title span {font-weight: 400; color: rgba(255,255,255,0.85);}
+        .hero-sub {margin-top: 8px; font-size: 0.92rem; color: rgba(255,255,255,0.82);}
 
-        /* KPI 지표 카드: 흰색 + 큰 라운드 + 은은한 그림자 */
+        /* KPI 카드: 흰색 큰 라운드, 첫 번째 카드는 블랙으로 포인트 */
         [data-testid="stMetric"] {
             background: #FFFFFF; border: none;
-            border-radius: 20px; padding: 16px 20px;
-            box-shadow: 0 8px 22px rgba(59, 157, 248, 0.10);
+            border-radius: 24px; padding: 18px 22px;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
             transition: transform .15s ease;
         }
-        [data-testid="stMetric"]:hover {transform: translateY(-2px);}
-        [data-testid="stMetricLabel"] {font-size: 0.85rem; color: #5B7FA6;}
-        [data-testid="stMetricValue"] {color: #0F3D6E;}
+        [data-testid="stMetric"]:hover {transform: translateY(-3px);}
+        [data-testid="stMetricLabel"] {font-size: 0.85rem; color: #64748B;}
+        [data-testid="stMetricValue"] {color: #0F172A; font-weight: 800;}
+        [data-testid="stHorizontalBlock"] > div:first-child [data-testid="stMetric"] {
+            background: #0F172A;
+            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.28);
+        }
+        [data-testid="stHorizontalBlock"] > div:first-child [data-testid="stMetricLabel"] {
+            color: rgba(255,255,255,0.65);
+        }
+        [data-testid="stHorizontalBlock"] > div:first-child [data-testid="stMetricValue"] {
+            color: #FFFFFF;
+        }
 
-        /* 탭: 흰색 알약 → 선택되면 하늘색 채움 */
+        /* 탭: 흰 알약 칩 → 선택 시 블루 채움 */
         .stTabs [data-baseweb="tab-list"] {gap: 8px; flex-wrap: wrap;}
         .stTabs [data-baseweb="tab"] {
-            border-radius: 999px; padding: 8px 18px;
+            border-radius: 999px; padding: 9px 20px;
             background: #FFFFFF;
-            box-shadow: 0 2px 10px rgba(59, 157, 248, 0.08);
+            box-shadow: 0 3px 10px rgba(15, 23, 42, 0.06);
         }
         .stTabs [aria-selected="true"] {
-            background: #3B9DF8 !important; color: #FFFFFF !important;
+            background: #2F6BFF !important; color: #FFFFFF !important;
         }
 
-        /* 그래프도 흰색 라운드 카드 위에 얹기 */
+        /* 그래프: 흰색 큰 라운드 카드 위에 */
         [data-testid="stPlotlyChart"] {
-            background: #FFFFFF; border-radius: 20px; padding: 12px;
-            box-shadow: 0 8px 22px rgba(59, 157, 248, 0.10);
+            background: #FFFFFF; border-radius: 24px; padding: 14px;
+            box-shadow: 0 10px 24px rgba(15, 23, 42, 0.06);
         }
 
-        /* 입력창·선택창: 둥근 모서리 + 흰 배경 */
+        /* 입력창·선택창: 알약 모양 + 흰 배경 */
         [data-testid="stTextInput"] input, [data-testid="stDateInput"] input {
-            border-radius: 999px; background: #FFFFFF;
+            border-radius: 999px; background: #FFFFFF; border: none;
+            box-shadow: 0 3px 10px rgba(15, 23, 42, 0.05);
         }
-        [data-baseweb="select"] > div {border-radius: 999px; background: #FFFFFF;}
+        [data-baseweb="select"] > div {
+            border-radius: 999px; background: #FFFFFF; border: none;
+            box-shadow: 0 3px 10px rgba(15, 23, 42, 0.05);
+        }
 
-        /* 버튼: 하늘색 알약 */
+        /* 버튼: 블루 알약 (호버 시 진해짐) */
         .stButton > button {
             border-radius: 999px; border: none;
-            background: #3B9DF8; color: #FFFFFF; padding: 8px 22px;
-            box-shadow: 0 6px 16px rgba(59, 157, 248, 0.28);
+            background: #2F6BFF; color: #FFFFFF; padding: 10px 26px; font-weight: 700;
+            box-shadow: 0 8px 20px rgba(47, 107, 255, 0.35);
         }
-        .stButton > button:hover {background: #2F8BE0; color: #FFFFFF;}
+        .stButton > button:hover {background: #1E56E0; color: #FFFFFF;}
 
-        /* 펼침 메뉴(expander)·채팅 말풍선·표: 흰색 라운드 카드 */
+        /* 페이지 링크: 흰 알약 카드 버튼처럼 */
+        [data-testid="stPageLink"] a {
+            background: #FFFFFF; border-radius: 999px; padding: 8px 18px;
+            box-shadow: 0 3px 10px rgba(15, 23, 42, 0.06);
+        }
+
+        /* 펼침 메뉴·채팅 말풍선·표: 흰색 라운드 카드 */
         [data-testid="stExpander"] {
-            background: #FFFFFF; border: none; border-radius: 18px;
-            box-shadow: 0 4px 14px rgba(59, 157, 248, 0.08);
+            background: #FFFFFF; border: none; border-radius: 22px;
+            box-shadow: 0 6px 16px rgba(15, 23, 42, 0.05);
         }
         [data-testid="stChatMessage"] {
-            background: #FFFFFF; border-radius: 18px; padding: 8px 14px;
-            box-shadow: 0 4px 14px rgba(59, 157, 248, 0.08);
+            background: #FFFFFF; border-radius: 20px; padding: 10px 16px;
+            box-shadow: 0 6px 16px rgba(15, 23, 42, 0.05);
             margin-bottom: 6px;
         }
         [data-testid="stDataFrame"] {
-            background: #FFFFFF; border-radius: 16px; padding: 6px;
-            box-shadow: 0 4px 14px rgba(59, 157, 248, 0.08);
+            background: #FFFFFF; border-radius: 20px; padding: 8px;
+            box-shadow: 0 6px 16px rgba(15, 23, 42, 0.05);
         }
+        [data-testid="stAlert"] {border-radius: 18px;}
 
-        /* 안내 박스도 라운드하게 */
-        [data-testid="stAlert"] {border-radius: 16px;}
+        /* 사이드바: 흰색 */
+        [data-testid="stSidebar"] {background: #FFFFFF;}
 
         /* 모바일(좁은 화면) 대응 */
         @media (max-width: 640px) {
             [data-testid="stMetricValue"] {font-size: 1.25rem;}
-            .hero-title {font-size: 1.3rem;}
+            .hero-title {font-size: 1.35rem;}
+            .hero {padding: 22px 24px;}
             .block-container {padding-left: 0.8rem; padding-right: 0.8rem; padding-top: 2.6rem;}
 
-            /* 좌우로 나눈 칸(st.columns)을 세로로 쌓아서 그래프가 찌그러지지 않게 */
+            /* 좌우 칸을 세로로 쌓아 그래프가 찌그러지지 않게 */
             [data-testid="stHorizontalBlock"] {flex-direction: column; gap: 0.6rem;}
             [data-testid="stHorizontalBlock"] > div {
                 width: 100% !important; min-width: 100% !important; flex: 1 1 100% !important;
             }
-
-            /* 그래프 카드의 안쪽 여백 축소 → 그래프 영역 최대화 */
-            [data-testid="stPlotlyChart"] {padding: 4px;}
-
-            /* 페이지 메뉴(라디오)가 줄바꿈되며 자연스럽게 흐르게 */
+            [data-testid="stPlotlyChart"] {padding: 6px;}
             [data-testid="stRadio"] > div {flex-wrap: wrap; gap: 4px;}
         }
         </style>
