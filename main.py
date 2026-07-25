@@ -445,23 +445,124 @@ def load_riders_raw(api_key: str, pasng_ymd: str = "", stn_nm: str = "",
     return _standardize_riders(pd.DataFrame(all_rows))
 
 
+# ─────────────────────────────────────────────
+# 1-b) 2025년 승하차 보완 데이터 (첨부 CSV)
+#      서울교통공사_역별 일별 시간대별 승하차인원 (2025-01-01 ~ 2025-12-31)
+# ─────────────────────────────────────────────
+CSV_FILE = "서울교통공사_역별 일별 시간대별 승하차인원_20251231.csv"
+
+
+@st.cache_data(show_spinner=False)
+def load_csv_raw():
+    """2025년 CSV를 읽어 원본 그대로 반환 (파일이 없으면 None)."""
+    df = None
+    for enc in ("cp949", "utf-8-sig", "euc-kr"):
+        try:
+            df = pd.read_csv(CSV_FILE, encoding=enc)
+            break
+        except UnicodeDecodeError:
+            continue
+        except FileNotFoundError:
+            return None
+        except Exception:
+            return None
+    if df is None or "수송일자" not in df.columns:
+        return None
+    df = df.dropna(subset=["수송일자"])            # 파일 끝의 빈 행 제거
+    df["수송일자"] = df["수송일자"].astype(str).str.replace("-", "").str[:8]
+    return df
+
+
+@st.cache_data(show_spinner=False)
+def csv_date_range():
+    """CSV가 담고 있는 날짜 범위 (없으면 (None, None))."""
+    raw = load_csv_raw()
+    if raw is None or raw.empty:
+        return None, None
+    return raw["수송일자"].min(), raw["수송일자"].max()
+
+
+def _csv_hour(col):
+    """'06-07시간대' → '06', '06시이전' → '05', '24시이후' → '24'."""
+    m = re.match(r"^(\d{2})-\d{2}시간대", str(col))
+    if m:
+        return m.group(1)
+    if "이전" in str(col):
+        return "05"
+    if "이후" in str(col):
+        return "24"
+    return None
+
+
+@st.cache_data(show_spinner=False)
+def load_csv_period(date_strs: tuple, station: str = ""):
+    """CSV에서 기간+역 데이터를 API와 같은 표준 형태
+    (날짜/호선/역명/시간/승차/하차/합계)로 변환해 반환."""
+    raw = load_csv_raw()
+    if raw is None:
+        return pd.DataFrame()
+    sub = raw[raw["수송일자"].isin(date_strs)]
+    if station:
+        sub = sub[sub["역명"].apply(lambda x: station_match(str(x), station))]
+    if sub.empty:
+        return pd.DataFrame()
+    time_cols = [c for c in sub.columns if _csv_hour(c)]
+    # 시간대 컬럼(가로) → 행(세로)으로 펼치기
+    m = sub.melt(id_vars=["수송일자", "호선", "역명", "승하차구분"],
+                 value_vars=time_cols, var_name="시간대", value_name="인원")
+    m["시간"] = m["시간대"].map(_csv_hour)
+    m["인원"] = to_num(m["인원"]).fillna(0)
+    # 승차/하차 행을 옆으로 나란히 붙이기
+    p = (m.pivot_table(index=["수송일자", "호선", "역명", "시간"],
+                       columns="승하차구분", values="인원", aggfunc="sum")
+         .reset_index())
+    for col in ("승차", "하차"):
+        if col not in p.columns:
+            p[col] = 0
+    out = pd.DataFrame({
+        "날짜": p["수송일자"].astype(str),
+        "호선": p["호선"].astype(str),
+        "역명": p["역명"].astype(str),
+        "시간": p["시간"].astype(str),
+        "승차": to_num(p["승차"]).fillna(0).astype(int),
+        "하차": to_num(p["하차"]).fillna(0).astype(int),
+    })
+    out["합계"] = out["승차"] + out["하차"]
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_ridership_period(api_key: str, date_strs: tuple, station: str = ""):
-    """여러 날짜(일별/월별/기간)를 합쳐서 조회. stnNm은 '포함' 검색이므로 재필터.
+    """여러 날짜(일별/월별/기간) 조회.
+    2025년 → 첨부 CSV, 최근 일주일 → 실시간 API에서 가져와 합친다.
     반환 (df, err, note)."""
+    cmin, cmax = csv_date_range()
+    csv_dates = tuple(ds for ds in date_strs if cmin and cmin <= ds <= cmax)
+    api_min = (dt.date.today() - dt.timedelta(days=7)).strftime("%Y%m%d")
     frames, first_err = [], None
+
+    # 1) CSV 범위(2025년)
+    if csv_dates:
+        df = load_csv_period(csv_dates, station)
+        if not df.empty:
+            frames.append(df)
+
+    # 2) API 범위(최근 일주일) — CSV로 못 채운 날짜만
     for ds in date_strs:
+        if ds in set(csv_dates) or ds < api_min:
+            continue
         df, e = load_riders_raw(api_key, ds, station)
         if e:
             first_err = first_err or e   # 첫 에러만 기억
             continue
         if df is not None and not df.empty:
             frames.append(df)
+
     if not frames:
         if first_err:
             return pd.DataFrame(), first_err, None
         return (pd.DataFrame(), None,
-                "조회 기간에 데이터가 없습니다. (승하차 API는 최근 일주일 데이터만 제공)")
+                "조회 기간에 데이터가 없습니다. (2025년: 첨부 CSV / 최근 일주일: 실시간 API 제공)")
     out = pd.concat(frames, ignore_index=True)
     if station:
         out = out[out["역명"].apply(lambda x: station_match(x, station))]
@@ -481,20 +582,36 @@ def load_station_list(api_key: str, date_str: str):
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def load_trend(api_key: str, base_date: dt.date, station: str, days: int = TREND_DAYS):
-    """최근 N일(최대 일주일) 역별 승하차 추이. 날짜별 stnNm 필터 조회."""
+    """기준일 직전 N일 승하차 추이. 2025년 날짜는 CSV, 최근 일주일은 API에서 수집."""
+    date_strs = tuple((base_date - dt.timedelta(days=days - 1 - i)).strftime("%Y%m%d")
+                      for i in range(days))
+    cmin, cmax = csv_date_range()
+    csv_dates = tuple(ds for ds in date_strs if cmin and cmin <= ds <= cmax)
+    api_min = (dt.date.today() - dt.timedelta(days=7)).strftime("%Y%m%d")
     recs = []
-    for i in range(days):
-        d = base_date - dt.timedelta(days=days - 1 - i)
-        ds = d.strftime("%Y%m%d")
+    # 1) CSV에서 한 번에
+    if csv_dates:
+        df = load_csv_period(csv_dates, station)
+        if not df.empty:
+            g = df.groupby("날짜")[["승차", "하차"]].sum().reset_index()
+            for _, r in g.iterrows():
+                recs.append({"날짜": dt.datetime.strptime(r["날짜"], "%Y%m%d").date(),
+                             "승차": int(r["승차"]), "하차": int(r["하차"])})
+    # 2) 나머지는 API에서 날짜별로
+    for ds in date_strs:
+        if ds in set(csv_dates) or ds < api_min:
+            continue
         df, e = load_riders_raw(api_key, ds, station)
         if e or df is None or df.empty:
             continue
         sub = df[df["역명"].apply(lambda x: station_match(x, station))]
         if sub.empty:
             continue
-        recs.append({"날짜": d, "승차": int(sub["승차"].sum()),
-                     "하차": int(sub["하차"].sum())})
-    return pd.DataFrame(recs)
+        recs.append({"날짜": dt.datetime.strptime(ds, "%Y%m%d").date(),
+                     "승차": int(sub["승차"].sum()), "하차": int(sub["하차"].sum())})
+    if not recs:
+        return pd.DataFrame()
+    return pd.DataFrame(recs).sort_values("날짜").reset_index(drop=True)
 
 
 # ─────────────────────────────────────────────
@@ -595,10 +712,14 @@ keys = {
     "elevator": get_secret("ELEVATOR_API_KEY"),
 }
 
-# 승하차 API가 제공하는 날짜 범위: 최근 일주일 (어제 ~ 7일 전)
+# 조회 가능 날짜 범위
+#  - 실시간 API: 최근 일주일 (어제 ~ 7일 전)
+#  - 첨부 CSV: 2025년 전체 → CSV가 있으면 그 시작일까지 범위 확장
 TODAY = dt.date.today()
-MIN_DAY = TODAY - dt.timedelta(days=7)
+API_MIN = TODAY - dt.timedelta(days=7)
 MAX_DAY = TODAY - dt.timedelta(days=1)
+_cmin, _cmax = csv_date_range()
+MIN_DAY = (dt.datetime.strptime(_cmin, "%Y%m%d").date() if _cmin else API_MIN)
 
 st.markdown("## 🚇 서울교통공사 역 분석 대시보드")
 
@@ -607,8 +728,16 @@ col_search, col_select = st.columns([1, 1.6])
 with st.spinner("역 목록 로딩 중..."):
     rid_df, rid_err = load_station_list(keys["riders"], MAX_DAY.strftime("%Y%m%d"))
 
+# 역 목록: API 스냅샷 → 실패하면 첨부 CSV에서 확보
+stations = []
 if not rid_df.empty:
     stations = sorted(rid_df["역명"].unique().tolist())
+else:
+    _csv_raw = load_csv_raw()
+    if _csv_raw is not None and "역명" in _csv_raw.columns:
+        stations = sorted(_csv_raw["역명"].astype(str).unique().tolist())
+
+if stations:
     search = col_search.text_input("🔍 역 검색", placeholder="예: 강남, 시청, 왕십리")
     filtered = ([s for s in stations if norm_station(search) in norm_station(s)]
                 if search else stations)
@@ -634,11 +763,14 @@ if mode == "일별":
     period_label = d.strftime("%Y-%m-%d")
 
 elif mode == "월별":
-    # 이번 달 / 지난 달 중 선택 → 그 달의 날짜 중 API 제공 범위와 겹치는 날만 조회
-    cur_first = MAX_DAY.replace(day=1)
-    prev_first = (cur_first - dt.timedelta(days=1)).replace(day=1)
-    month_sel = st.selectbox("월 선택",
-                             [cur_first.strftime("%Y-%m"), prev_first.strftime("%Y-%m")])
+    # 2025-01부터 이번 달까지 모두 선택 가능 (최신 달이 먼저 보이게)
+    months = []
+    _m = MAX_DAY.replace(day=1)
+    _stop = MIN_DAY.replace(day=1)
+    while _m >= _stop:
+        months.append(_m.strftime("%Y-%m"))
+        _m = (_m - dt.timedelta(days=1)).replace(day=1)
+    month_sel = st.selectbox("월 선택", months)
     y, m = map(int, month_sel.split("-"))
     d0 = dt.date(y, m, 1)
     d1 = (dt.date(y + (1 if m == 12 else 0), 1 if m == 12 else m + 1, 1)
@@ -649,7 +781,8 @@ elif mode == "월별":
     period_label = month_sel
 
 else:  # 기간 설정
-    rng = st.date_input("기간 (시작 ~ 종료)", value=(MIN_DAY, MAX_DAY),
+    rng = st.date_input("기간 (시작 ~ 종료)",
+                        value=(max(MIN_DAY, MAX_DAY - dt.timedelta(days=6)), MAX_DAY),
                         min_value=MIN_DAY, max_value=MAX_DAY)
     # 날짜를 고르는 중에는 값이 1개만 들어올 수 있어 안전하게 처리
     if isinstance(rng, (tuple, list)):
@@ -664,7 +797,8 @@ else:  # 기간 설정
     date_list = [s + dt.timedelta(days=i) for i in range((e - s).days + 1)]
     period_label = f"{s.strftime('%Y-%m-%d')} ~ {e.strftime('%Y-%m-%d')}"
 
-st.caption("ℹ️ 승하차 API는 **최근 일주일** 데이터만 제공합니다. 그 이전 날짜는 조회 범위에서 제외돼요.")
+st.caption("ℹ️ **2025년 데이터**는 첨부된 통계 파일에서, **최근 일주일**은 실시간 API에서 조회합니다. "
+           "2026년 중 일주일 이전 날짜는 두 데이터의 제공 범위 밖이라 조회되지 않아요.")
 
 with st.expander("🔑 API 키 설정 상태"):
     labels = {
