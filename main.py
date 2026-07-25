@@ -1043,7 +1043,8 @@ if page == "⚖️ 관심역 비교 분석":
         fig.update_layout(height=420, margin=dict(t=20, b=10),
                           legend=dict(orientation="h", y=1.12))
         show_chart(fig)
-        st.caption("역별 시간대 평균 혼잡도 (100% = 정원 기준 만석)")
+        st.caption("역별 시간대 평균 혼잡도 · 출처: 서울교통공사 1~8호선 30분 단위 평균 "
+                   "(좌석 수만큼 승차 시 34%, 100% = 정원 기준 만차)")
     else:
         st.info("혼잡도 데이터를 불러오지 못했습니다. (BUSY_API_KEY 설정 또는 데이터 제공 여부를 확인하세요)")
 
@@ -1073,6 +1074,16 @@ else:
 
 # ═══ 페이지: 혼잡도 (탭 없이 바로 표시) ═══
 if page == "📈 혼잡도":
+    # 데이터 출처·산정 기준 안내
+    with st.expander("ℹ️ 혼잡도 데이터 안내 (출처: 서울교통공사)", expanded=False):
+        st.markdown(
+            """
+            - **출처**: 서울교통공사 지하철 혼잡도 정보 (2024년부터 **분기별** 제공)
+            - **의미**: 1~8호선 **30분 단위 평균 혼잡도** — 30분간 지나는 열차들의 평균값 (단위: %)
+            - **산정 기준**: 정원 대비 승차 인원 비율. 승차 인원이 **좌석 수와 같으면 혼잡도 34%**
+            - **데이터 구성**: 요일구분(평일·토요일·일요일) · 호선 · 역번호 · 역명 · 상하선 구분 · 30분 단위 혼잡도
+            """
+        )
     with st.spinner("혼잡도 데이터 로딩 중..."):
         busy_df, busy_err = load_congestion(keys["busy"], station)
     if busy_err:
@@ -1196,7 +1207,8 @@ if page == "🗺️ 주변 역 지도":
                 fig.update_xaxes(tickangle=-45, tickfont=dict(size=9))
                 fig.update_layout(height=120 + 46 * len(hm), margin=dict(t=20, b=10))
                 show_chart(fig)
-                st.caption("색이 진할수록 혼잡 (요일·상하행 평균, 100% = 정원 기준 만석)")
+                st.caption("색이 진할수록 혼잡 (요일·상하행 평균) · 출처: 서울교통공사 1~8호선 "
+                           "30분 단위 평균 혼잡도 (좌석 수만큼 승차 시 34%, 100% = 정원 기준 만차)")
             else:
                 st.info("주변 역의 혼잡도 데이터를 불러오지 못했습니다. (BUSY_API_KEY 필요)")
     st.stop()   # 이 페이지는 여기서 끝
