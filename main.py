@@ -60,7 +60,8 @@ def get_secret(name: str):
     """Secrets에서 키를 안전하게 로드. 키 값은 절대 화면/로그에 출력하지 않는다."""
     try:
         v = st.secrets.get(name)
-        v = str(v).strip() if v else ""
+        # 공백/따옴표가 섞여 들어간 경우 정리
+        v = str(v).strip().strip('"').strip("'").strip() if v else ""
         return v or None
     except Exception:
         return None
@@ -103,6 +104,24 @@ def numeric_cols(df: pd.DataFrame):
     return out
 
 
+def _parse_xml_error(content: bytes) -> str:
+    """서울 API가 반환한 XML/HTML 에러 문서에서 원인 메시지를 추출."""
+    try:
+        root = ET.fromstring(content)
+        code_el = root.find(".//CODE")
+        msg_el = root.find(".//MESSAGE")
+        code = code_el.text.strip() if code_el is not None and code_el.text else ""
+        msg = msg_el.text.strip() if msg_el is not None and msg_el.text else ""
+        if code or msg:
+            hint = ""
+            if "인증키" in msg or code in ("INFO-100", "ERROR-500"):
+                hint = " → Secrets에 등록한 인증키를 확인하세요. (서울열린데이터광장에서 발급한 키인지, 공백/오타가 없는지)"
+            return f"API 오류 [{code}]: {msg}{hint}"
+    except ET.ParseError:
+        pass
+    return "응답 파싱 실패: 서버가 예상하지 못한 형식을 반환했습니다. 인증키가 유효한지 확인하세요."
+
+
 # ─────────────────────────────────────────────
 # 공통 API 호출 (서울열린데이터광장)
 # ─────────────────────────────────────────────
@@ -125,7 +144,8 @@ def fetch_seoul(api_key: str, service: str, fmt: str = "json",
         try:
             data = r.json()
         except ValueError:
-            return None, "응답 파싱 실패 (JSON 형식 오류)"
+            # 인증키가 유효하지 않으면 JSON 요청에도 XML 에러 문서가 반환됨
+            return None, _parse_xml_error(r.content)
         if service in data:
             block = data[service]
             code = (block.get("RESULT") or {}).get("CODE", "")
