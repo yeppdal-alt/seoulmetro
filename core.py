@@ -28,11 +28,22 @@ SOLAR_BASE_URL = "https://api.upstage.ai/v1"
 SOLAR_MODEL = "solar-open2"            # 모델 이름은 글자 그대로 사용
 
 
-def page_setup(title="지하철 인사이트 랩 · 서울교통공사", icon="🚇"):
-    """각 페이지 첫머리에서 호출: 페이지 설정 + 공통 CSS 적용."""
+def page_setup(title="지하철 인사이트 랩 · 서울교통공사", icon="🚇",
+               highlight_third_metric=True):
+    """각 페이지 첫머리에서 호출: 페이지 설정 + 공통 CSS 적용.
+    highlight_third_metric: 세 번째 KPI 카드 숫자를 파란색으로 (메인 페이지의 '총 이용객'용)"""
     st.set_page_config(page_title=title, page_icon=icon, layout="wide",
                        initial_sidebar_state="auto")  # 사이드바에 페이지 목록 표시
     _apply_css()
+    if highlight_third_metric:
+        st.markdown(
+            """<style>
+            [data-testid="stHorizontalBlock"] > div:nth-child(3) [data-testid="stMetricValue"] {
+                color: #2F6BFF;
+            }
+            </style>""",
+            unsafe_allow_html=True,
+        )
 
 
 def _apply_css():
@@ -518,6 +529,9 @@ _CSV_READ_OPTIONS = (
     {"encoding": "utf-16"},
     {"encoding": "cp949", "sep": None, "engine": "python"},   # 구분자 자동 감지
     {"encoding": "utf-8", "sep": None, "engine": "python"},
+    # 최후의 수단: 깨진 글자가 있어도 무시하고 읽기
+    {"encoding": "cp949", "encoding_errors": "replace"},
+    {"encoding": "utf-8", "encoding_errors": "replace"},
 )
 
 
@@ -586,9 +600,10 @@ def csv_diagnostic():
     return msgs
 
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(ttl=600, show_spinner=False)
 def csv_date_range():
-    """CSV가 담고 있는 날짜 범위 (없으면 (None, None))."""
+    """CSV가 담고 있는 날짜 범위 (없으면 (None, None)).
+    ttl을 줘서, 파일을 나중에 올려도 10분 안에 자동으로 다시 인식된다."""
     raw = load_csv_raw()
     if raw is None or raw.empty:
         return None, None
