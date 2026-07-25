@@ -6,10 +6,13 @@ AI 분석 페이지 (pages/00_AI분석기.py)
 """
 from core import *   # 공통 모듈 (데이터 로더, 스타일, Solar API 등)
 
-page_setup("AI 분석 · 서울교통공사 대시보드", "🤖")
+page_setup("역 대 역 · AI 비교 분석실", "🥊")
 
-st.markdown("## 🤖 AI 분석")
-st.page_link("main.py", label="⬅️ 메인 대시보드로 돌아가기")
+st.markdown("## 🥊 역 대 역 — AI 비교 분석실")
+try:
+    st.page_link("main.py", label="⬅️ 메인 대시보드로 돌아가기")
+except Exception:
+    st.caption("⬅️ 메인 대시보드는 왼쪽 사이드바에서 열 수 있어요.")
 
 keys = get_keys()
 with st.spinner("역 목록 로딩 중..."):
@@ -21,8 +24,8 @@ with st.spinner("역 목록 로딩 중..."):
 st.markdown(
     """
     <div class="hero">
-      <div class="hero-title">⚖️ 관심역 비교 분석</div>
-      <div class="hero-sub">관심 있는 역을 최대 3곳까지 골라 승하차·시간대 패턴·혼잡도를 나란히 비교합니다</div>
+      <div class="hero-title">⚖️ 관심역 맞대결</div>
+      <div class="hero-sub">최대 3개 역을 링 위에 올려 승하차·시간대 패턴·혼잡도를 겨뤄봅니다</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -71,7 +74,7 @@ else:
             comp = pd.DataFrame(rows)
             fig = px.bar(comp, x="역", y="인원", color="구분", barmode="group",
                          template=PLOTLY_TEMPLATE,
-                         color_discrete_map={"승차": "#3B9DF8", "하차": "#FF7E9D"})
+                         color_discrete_map={"승차": "#2F6BFF", "하차": "#0F172A"})
             fig.update_layout(height=380, margin=dict(t=20, b=10),
                               legend=dict(orientation="h", y=1.1))
             show_chart(fig)
