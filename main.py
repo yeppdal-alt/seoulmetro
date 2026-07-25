@@ -1,390 +1,582 @@
+# -*- coding: utf-8 -*-
 """
-서울 지하철 혼잡도 분석 대시보드
-------------------------------------------------
-- 데이터 출처: 서울교통공사 지하철혼잡도정보
-- 실행 방법:
-    1) 이 app.py 와 requirements.txt, 그리고
-       "서울교통공사_지하철혼잡도정보_20251130.csv"
-       파일을 같은 폴더에 넣는다.
-    2) pip install -r requirements.txt
-    3) streamlit run app.py
-- Streamlit Cloud 배포 시: 저장소 루트에 app.py, requirements.txt,
-  CSV 파일을 함께 올리면 그대로 동작한다.
+서울교통공사 역 분석 대시보드
+- 승하차인원 / 환승인원 / 혼잡도 / 역사 건축 현황 / 승강기(교통약자 시설)
+- 모든 API Key는 st.secrets에서 로드 (하드코딩 금지)
 """
-
 import re
-import numpy as np
+import datetime as dt
+import xml.etree.ElementTree as ET
+from urllib.parse import quote
+
 import pandas as pd
+import requests
+import streamlit as st
 import plotly.express as px
 import plotly.graph_objects as go
-import streamlit as st
 
-# ------------------------------------------------------------------
-# 0. 기본 설정
-# ------------------------------------------------------------------
+# ─────────────────────────────────────────────
+# 기본 설정
+# ─────────────────────────────────────────────
 st.set_page_config(
-    page_title="서울 지하철 혼잡도 분석",
+    page_title="서울교통공사 역 분석 대시보드",
     page_icon="🚇",
     layout="wide",
+    initial_sidebar_state="expanded",
 )
 
-DATA_FILE = "서울교통공사_지하철혼잡도정보_20251130.csv"
-
-DATA_DESCRIPTION = """
-**데이터 설명**
-
-- 서울교통공사 1~8호선의 **30분 단위 평균 혼잡도**로, 해당 30분 동안 역을 통과한
-  모든 열차의 평균 혼잡도 값입니다.
-- 혼잡도 = **열차 정원 대비 실제 승차 인원 비율(%)**. 좌석이 모두 찬 상태를 34%로 산정합니다.
-- 구성 항목: 요일 구분(평일/토요일/일요일), 호선, 역번호, 역명, 상하선 구분, 30분 단위 혼잡도(%)
-- 2024년부터 **분기별**로 제공되는 데이터이며, 실제 배차 간격이나 행사·폭우·파업 등
-  특이 이벤트는 반영되지 않을 수 있습니다.
-"""
-
-TIME_COLS = [
-    "5시30분", "6시00분", "6시30분", "7시00분", "7시30분", "8시00분", "8시30분",
-    "9시00분", "9시30분", "10시00분", "10시30분", "11시00분", "11시30분",
-    "12시00분", "12시30분", "13시00분", "13시30분", "14시00분", "14시30분",
-    "15시00분", "15시30분", "16시00분", "16시30분", "17시00분", "17시30분",
-    "18시00분", "18시30분", "19시00분", "19시30분", "20시00분", "20시30분",
-    "21시00분", "21시30분", "22시00분", "22시30분", "23시00분", "23시30분",
-    "00시00분", "00시30분",
-]
-
-# 서울교통공사 혼잡도 구간 기준 (칸당 정원 대비 재차인원 비율, %)
-CONGESTION_BANDS = [
-    (0, 34, "여유", "#3B82F6"),
-    (34, 80, "보통", "#22C55E"),
-    (80, 130, "주의", "#EAB308"),
-    (130, 150, "혼잡", "#F97316"),
-    (150, 10_000, "매우혼잡", "#EF4444"),
-]
-
-
-def congestion_level(value: float) -> tuple[str, str]:
-    """혼잡도 수치를 등급/색상으로 변환"""
-    for lo, hi, label, color in CONGESTION_BANDS:
-        if lo <= value < hi:
-            return label, color
-    return "매우혼잡", "#EF4444"
-
-
-def time_label(col: str) -> str:
-    """'5시30분' -> '05:30', 자정 이후는 '24:00' '24:30' 로 표기해 시간축 연속성 유지"""
-    m = re.match(r"(\d+)시(\d+)분", col)
-    h, mm = int(m.group(1)), int(m.group(2))
-    if h < 5:  # 00시00분, 00시30분 -> 자정 넘긴 시간대
-        h += 24
-    return f"{h:02d}:{mm:02d}"
-
-
-TIME_LABELS = [time_label(c) for c in TIME_COLS]
-
-
-# ------------------------------------------------------------------
-# 1. 데이터 로드
-# ------------------------------------------------------------------
-@st.cache_data
-def load_data(path: str) -> pd.DataFrame:
-    df = pd.read_csv(path, encoding="cp949")
-    df["역번호"] = df["역번호"].astype(str)
-    return df
-
-
-try:
-    df = load_data(DATA_FILE)
-except FileNotFoundError:
-    st.error(
-        f"'{DATA_FILE}' 파일을 찾을 수 없습니다. "
-        "app.py와 같은 폴더(또는 저장소 루트)에 CSV 파일을 넣어주세요."
-    )
-    st.stop()
-
-ALL_LINES = sorted(df["호선"].unique(), key=lambda x: int(re.sub(r"\D", "", x)))
-ALL_DAYTYPES = ["평일", "토요일", "일요일"]
-
-# ------------------------------------------------------------------
-# 2. 사이드바 - 필터 & 역 선택 (드롭다운 선택 + 검색어 입력 동시 지원)
-# ------------------------------------------------------------------
-st.sidebar.header("🔎 조회 조건")
-
-daytype = st.sidebar.radio("요일 구분", ALL_DAYTYPES, horizontal=True)
-
-line_sel = st.sidebar.selectbox("호선 선택", ["전체"] + list(ALL_LINES))
-
-search_kw = st.sidebar.text_input(
-    "역 이름 검색(입력)", placeholder="예: 강남, 서울역, 홍대입구 ..."
+st.markdown(
+    """
+    <style>
+    .block-container {padding-top: 1.2rem; padding-bottom: 2rem;}
+    [data-testid="stMetric"] {
+        background: rgba(28, 131, 225, 0.06);
+        border: 1px solid rgba(28, 131, 225, 0.15);
+        border-radius: 12px; padding: 12px 16px;
+    }
+    [data-testid="stMetricLabel"] {font-size: 0.85rem;}
+    @media (max-width: 640px) {
+        [data-testid="stMetricValue"] {font-size: 1.3rem;}
+        .block-container {padding-left: 0.8rem; padding-right: 0.8rem;}
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-# 필터링된 후보 목록 구성
-cand = df[df["요일구분"] == daytype].copy()
-if line_sel != "전체":
-    cand = cand[cand["호선"] == line_sel]
-if search_kw:
-    cand = cand[cand["출발역"].str.contains(search_kw.strip(), case=False, na=False)]
+SEOUL_BASE = "http://openapi.seoul.go.kr:8088"
+ODCLOUD_DOCS = "https://infuser.odcloud.kr/oas/docs?namespace=15044258/v1"
+ODCLOUD_API = "https://api.odcloud.kr/api"
+TIMEOUT = 12
+TREND_DAYS = 14
 
-cand["표시명"] = (
-    cand["호선"] + " · " + cand["출발역"] + " (" + cand["상하구분"] + ")"
-)
-station_options = sorted(cand["표시명"].unique())
-
-if not station_options:
-    st.sidebar.warning("검색 조건에 맞는 역이 없습니다. 검색어나 호선을 확인해주세요.")
-    st.stop()
-
-default_idx = 0
-station_display = st.sidebar.selectbox(
-    "역 선택(드롭다운)", station_options, index=default_idx
-)
-
-compare_stations = st.sidebar.multiselect(
-    "여러 역 비교(선택, 최대 5개)",
-    options=station_options,
-    default=[station_display],
-    max_selections=5,
-)
-
-st.sidebar.markdown("---")
-st.sidebar.caption(
-    "혼잡도 기준: 0~34% 여유 · 34~80% 보통 · 80~130% 주의 · 130~150% 혼잡 · 150%+ 매우혼잡"
-)
-
-# 선택된 역의 실제 행 가져오기 (여러 역번호가 같은 이름을 가질 수 있어 표시명 기준 매칭)
-def get_row(display_name: str) -> pd.Series:
-    return cand[cand["표시명"] == display_name].iloc[0]
+PLOTLY_TEMPLATE = "plotly_white"
 
 
-sel_row = get_row(station_display)
+# ─────────────────────────────────────────────
+# 유틸
+# ─────────────────────────────────────────────
+def get_secret(name: str):
+    """Secrets에서 키를 안전하게 로드. 키 값은 절대 화면/로그에 출력하지 않는다."""
+    try:
+        v = st.secrets.get(name)
+        v = str(v).strip() if v else ""
+        return v or None
+    except Exception:
+        return None
 
-# ------------------------------------------------------------------
-# 3. 헤더
-# ------------------------------------------------------------------
-st.title("🚇 서울 지하철역 혼잡도 분석 대시보드")
-st.caption("데이터: 서울교통공사 지하철혼잡도정보 (2025-11-30 기준)")
-with st.expander("ℹ️ 데이터 설명 보기", expanded=False):
-    st.markdown(DATA_DESCRIPTION)
 
-tab1, tab2, tab3, tab4 = st.tabs(
-    ["📈 선택역 상세", "🆚 역 간 비교", "🏆 전체 랭킹 · 히트맵", "💡 인사이트 & 추천 분석"]
-)
+def norm_station(name: str) -> str:
+    if not name:
+        return ""
+    n = re.sub(r"\(.*?\)", "", str(name))
+    return n.replace(" ", "").strip()
 
-# ------------------------------------------------------------------
-# TAB 1. 선택역 상세 분석
-# ------------------------------------------------------------------
-with tab1:
-    st.subheader(f"{sel_row['호선']} {sel_row['출발역']}역 ({sel_row['상하구분']}) · {daytype}")
 
-    values = sel_row[TIME_COLS].astype(float).values
-    peak_idx = int(np.argmax(values))
-    peak_time, peak_val = TIME_LABELS[peak_idx], values[peak_idx]
-    peak_label, peak_color = congestion_level(peak_val)
-    avg_val = values.mean()
+def station_match(a: str, b: str) -> bool:
+    a, b = norm_station(a), norm_station(b)
+    if not a or not b:
+        return False
+    return a == b or a == b + "역" or b == a + "역"
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("최고 혼잡 시간대", peak_time)
-    c2.metric("최고 혼잡도", f"{peak_val:.1f}%", peak_label)
-    c3.metric("일 평균 혼잡도", f"{avg_val:.1f}%")
-    c4.metric("최저 혼잡도", f"{values.min():.1f}%")
 
-    fig = go.Figure()
+def find_col(cols, keywords):
+    cols = list(cols)
+    for kw in keywords:
+        for c in cols:
+            if kw.lower() in str(c).lower():
+                return c
+    return None
 
-    # 혼잡도 구간 배경 밴드
-    for lo, hi, label, color in CONGESTION_BANDS:
-        fig.add_hrect(
-            y0=lo, y1=min(hi, max(values.max(), hi) + 10),
-            fillcolor=color, opacity=0.07, line_width=0,
-        )
 
-    fig.add_trace(
-        go.Scatter(
-            x=TIME_LABELS,
-            y=values,
-            mode="lines+markers",
-            name=sel_row["출발역"],
-            line=dict(color="#2563EB", width=3),
-            marker=dict(size=5),
-            hovertemplate="%{x} · 혼잡도 %{y:.1f}%<extra></extra>",
-        )
-    )
-    fig.add_trace(
-        go.Scatter(
-            x=[peak_time], y=[peak_val],
-            mode="markers+text",
-            marker=dict(size=12, color="#EF4444", symbol="star"),
-            text=[f"최고 {peak_val:.1f}%"],
-            textposition="top center",
-            name="최고 혼잡",
-            showlegend=False,
-        )
-    )
-    fig.update_layout(
-        height=480,
-        xaxis_title="시간대",
-        yaxis_title="혼잡도(%)",
-        hovermode="x unified",
-        margin=dict(t=30, l=10, r=10, b=10),
-        template="plotly_white",
-    )
-    st.plotly_chart(fig, use_container_width=True)
+def to_num(s):
+    return pd.to_numeric(pd.Series(s).astype(str).str.replace(",", ""), errors="coerce")
 
-    with st.expander("같은 역, 다른 요일 비교 보기"):
-        day_fig = go.Figure()
-        for d in ALL_DAYTYPES:
-            row = df[
-                (df["호선"] == sel_row["호선"])
-                & (df["출발역"] == sel_row["출발역"])
-                & (df["상하구분"] == sel_row["상하구분"])
-                & (df["요일구분"] == d)
-            ]
-            if row.empty:
-                continue
-            vals = row.iloc[0][TIME_COLS].astype(float).values
-            day_fig.add_trace(
-                go.Scatter(x=TIME_LABELS, y=vals, mode="lines", name=d)
+
+def numeric_cols(df: pd.DataFrame):
+    """전부 숫자(콤마 허용)로 이루어진 컬럼 목록."""
+    out = []
+    for c in df.columns:
+        s = df[c].astype(str).str.replace(",", "").str.strip()
+        if len(s) and s.str.match(r"^-?\d+\.?\d*$").all():
+            out.append(c)
+    return out
+
+
+# ─────────────────────────────────────────────
+# 공통 API 호출 (서울열린데이터광장)
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_seoul(api_key: str, service: str, fmt: str = "json",
+                start: int = 1, end: int = 1000, extra: tuple = ()):
+    """반환: (rows(list[dict]) | None, error_message | None). 키는 에러 메시지에 포함하지 않음."""
+    if not api_key:
+        return None, "API 키가 Secrets에 설정되지 않았습니다."
+    parts = [SEOUL_BASE, api_key, fmt, service, str(start), str(end)]
+    parts += [quote(str(e)) for e in extra if str(e)]
+    url = "/".join(parts)
+    try:
+        r = requests.get(url, timeout=TIMEOUT)
+        r.raise_for_status()
+    except requests.RequestException:
+        return None, "API 호출 실패 (네트워크 또는 서버 오류)"
+
+    if fmt == "json":
+        try:
+            data = r.json()
+        except ValueError:
+            return None, "응답 파싱 실패 (JSON 형식 오류)"
+        if service in data:
+            block = data[service]
+            code = (block.get("RESULT") or {}).get("CODE", "")
+            if str(code).startswith("INFO-200"):
+                return [], None
+            return block.get("row") or [], None
+        code = str((data.get("RESULT") or {}).get("CODE", ""))
+        msg = (data.get("RESULT") or {}).get("MESSAGE", "알 수 없는 오류")
+        if code.startswith("INFO-200"):
+            return [], None
+        return None, f"API 오류: {msg}"
+
+    # XML
+    try:
+        root = ET.fromstring(r.content)
+    except ET.ParseError:
+        return None, "응답 파싱 실패 (XML 형식 오류)"
+    code_el = root.find(".//CODE")
+    code = code_el.text.strip() if code_el is not None and code_el.text else ""
+    rows = [{child.tag: (child.text or "").strip() for child in row}
+            for row in root.iter("row")]
+    if not rows:
+        if code.startswith("INFO-200"):
+            return [], None
+        if code and not code.startswith("INFO-000"):
+            msg_el = root.find(".//MESSAGE")
+            msg = msg_el.text.strip() if msg_el is not None and msg_el.text else "알 수 없는 오류"
+            return None, f"API 오류: {msg}"
+    return rows, None
+
+
+def fetch_seoul_with_fallback(api_key, service, fmt, station=None):
+    """역명 파라미터를 지원하면 필터 요청, 실패 시 전체 조회 후 클라이언트 필터링."""
+    if station:
+        rows, err = fetch_seoul(api_key, service, fmt, 1, 1000, (station,))
+        if rows:
+            return rows, None
+    return fetch_seoul(api_key, service, fmt, 1, 1000)
+
+
+# ─────────────────────────────────────────────
+# 1) 역별 승하차인원 (CardSubwayStatsNew, JSON)
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_ridership(api_key: str, date_str: str):
+    rows, err = fetch_seoul(api_key, "CardSubwayStatsNew", "json", 1, 1000, (date_str,))
+    if err:
+        return pd.DataFrame(), err
+    if not rows:
+        return pd.DataFrame(), None
+    df = pd.DataFrame(rows)
+    c_line = find_col(df.columns, ["SBWY_ROUT_LN_NM", "LINE_NUM", "LINE"])
+    c_stn = find_col(df.columns, ["SBWY_STNS_NM", "SUB_STA_NM", "STNS_NM", "STA_NM"])
+    c_ride = find_col(df.columns, ["GTON", "RIDE"])
+    c_alight = find_col(df.columns, ["GTOFF", "ALIGHT"])
+    if not all([c_line, c_stn, c_ride, c_alight]):
+        return pd.DataFrame(), "승하차 데이터 컬럼 구조를 인식할 수 없습니다."
+    out = pd.DataFrame({
+        "호선": df[c_line].astype(str),
+        "역명": df[c_stn].astype(str),
+        "승차": to_num(df[c_ride]).fillna(0).astype(int),
+        "하차": to_num(df[c_alight]).fillna(0).astype(int),
+    })
+    out["합계"] = out["승차"] + out["하차"]
+    return out, None
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_trend(api_key: str, base_date: dt.date, station: str, days: int = TREND_DAYS):
+    recs = []
+    for i in range(days):
+        d = base_date - dt.timedelta(days=days - 1 - i)
+        df, err = load_ridership(api_key, d.strftime("%Y%m%d"))
+        if err or df.empty:
+            continue
+        sub = df[df["역명"].apply(lambda x: station_match(x, station))]
+        if sub.empty:
+            continue
+        recs.append({"날짜": d, "승차": int(sub["승차"].sum()), "하차": int(sub["하차"].sum())})
+    return pd.DataFrame(recs)
+
+
+# ─────────────────────────────────────────────
+# 2) 환승인원 (StationDayTrnsitNmpr, XML)
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_transfer(api_key: str):
+    rows, err = fetch_seoul(api_key, "StationDayTrnsitNmpr", "xml", 1, 1000)
+    if err:
+        return pd.DataFrame(), err
+    return pd.DataFrame(rows), None
+
+
+# ─────────────────────────────────────────────
+# 3) 혼잡도 (subwConfusion, XML)
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_congestion(api_key: str, station: str):
+    rows, err = fetch_seoul_with_fallback(api_key, "subwConfusion", "xml", station)
+    if err:
+        return pd.DataFrame(), err
+    return pd.DataFrame(rows), None
+
+
+def detect_time_cols(df: pd.DataFrame):
+    """'5시30분', 'HR_06', '_0530' 등 시간대 형태 + 숫자값 컬럼 탐지."""
+    pat = re.compile(r"(\d{1,2}\s*시)|(^HR[_]?\d)|(_\d{3,4}$)|(^\d{1,2}:\d{2})", re.I)
+    return [c for c in df.columns
+            if pat.search(str(c)) and to_num(df[c]).notna().any()]
+
+
+# ─────────────────────────────────────────────
+# 4) 역사 건축 현황 (공공데이터포털 odcloud)
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=86400, show_spinner=False)
+def odcloud_paths():
+    r = requests.get(ODCLOUD_DOCS, timeout=TIMEOUT)
+    r.raise_for_status()
+    return list((r.json().get("paths") or {}).keys())
+
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def load_building(api_key: str):
+    if not api_key:
+        return pd.DataFrame(), "API 키가 Secrets에 설정되지 않았습니다."
+    try:
+        paths = odcloud_paths()
+    except Exception:
+        return pd.DataFrame(), "역사 건축 현황 API 명세(OAS) 조회에 실패했습니다."
+    all_rows = []
+    for p in paths:
+        try:
+            r = requests.get(
+                f"{ODCLOUD_API}{p}",
+                params={"page": 1, "perPage": 1000, "serviceKey": api_key},
+                timeout=TIMEOUT,
             )
-        day_fig.update_layout(
-            height=420, template="plotly_white",
-            xaxis_title="시간대", yaxis_title="혼잡도(%)",
-            margin=dict(t=20, l=10, r=10, b=10),
-        )
-        st.plotly_chart(day_fig, use_container_width=True)
+            if r.status_code == 200:
+                all_rows.extend(r.json().get("data") or [])
+        except Exception:
+            continue
+    if not all_rows:
+        return pd.DataFrame(), "역사 건축 현황 데이터를 불러오지 못했습니다. (키/권한 확인 필요)"
+    return pd.DataFrame(all_rows), None
 
-# ------------------------------------------------------------------
-# TAB 2. 여러 역 비교
-# ------------------------------------------------------------------
-with tab2:
-    st.subheader("선택한 역들의 시간대별 혼잡도 비교")
-    if not compare_stations:
-        st.info("사이드바에서 비교할 역을 1개 이상 선택해주세요.")
+
+# ─────────────────────────────────────────────
+# 5) 승강기 등 교통약자 시설 (SeoulMetroFaciInfo, XML)
+# ─────────────────────────────────────────────
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_elevator(api_key: str, station: str):
+    rows, err = fetch_seoul_with_fallback(api_key, "SeoulMetroFaciInfo", "xml", station)
+    if err:
+        return pd.DataFrame(), err
+    return pd.DataFrame(rows), None
+
+
+STATION_COL_KWS = ["STTN", "STNS_NM", "STA_NM", "STN_NM", "STATION", "역명", "역사명", "역이름"]
+
+
+def filter_by_station(df: pd.DataFrame, station: str, keywords=STATION_COL_KWS):
+    if df.empty:
+        return df
+    c = find_col(df.columns, keywords)
+    if not c:
+        return pd.DataFrame()
+    return df[df[c].apply(lambda x: station_match(str(x), station))]
+
+
+# ─────────────────────────────────────────────
+# 사이드바
+# ─────────────────────────────────────────────
+with st.sidebar:
+    st.title("🚇 역 분석 대시보드")
+    st.caption("서울교통공사 · 열린데이터광장 API 기반")
+
+    keys = {
+        "riders": get_secret("RIDERS_API_KEY"),
+        "transfer": get_secret("TRANSFER_API_KEY"),
+        "building": get_secret("BUILDING_API_KEY"),
+        "busy": get_secret("BUSY_API_KEY"),
+        "elevator": get_secret("ELEVATOR_API_KEY"),
+    }
+
+    base_date = st.date_input(
+        "기준 날짜 (승하차 통계)",
+        value=dt.date.today() - dt.timedelta(days=4),
+        max_value=dt.date.today() - dt.timedelta(days=1),
+        help="승하차 통계는 보통 3~4일 지연 제공됩니다.",
+    )
+    date_str = base_date.strftime("%Y%m%d")
+
+    with st.spinner("역 목록 로딩 중..."):
+        rid_df, rid_err = load_ridership(keys["riders"], date_str)
+
+    if not rid_df.empty:
+        stations = sorted(rid_df["역명"].unique().tolist())
+        search = st.text_input("역 검색", placeholder="예: 강남, 시청, 왕십리")
+        filtered = ([s for s in stations if norm_station(search) in norm_station(s)]
+                    if search else stations)
+        if not filtered:
+            st.warning("검색 결과가 없습니다. 전체 목록을 표시합니다.")
+            filtered = stations
+        default_idx = filtered.index("강남") if "강남" in filtered else 0
+        station = st.selectbox("역 선택", filtered, index=default_idx)
     else:
-        comp_fig = go.Figure()
-        rows_for_table = []
-        for disp in compare_stations:
-            r = get_row(disp)
-            vals = r[TIME_COLS].astype(float).values
-            comp_fig.add_trace(
-                go.Scatter(x=TIME_LABELS, y=vals, mode="lines+markers", name=disp)
-            )
-            rows_for_table.append(
-                {
-                    "역": disp,
-                    "최고 혼잡도(%)": round(vals.max(), 1),
-                    "최고 혼잡 시간대": TIME_LABELS[int(np.argmax(vals))],
-                    "평균 혼잡도(%)": round(vals.mean(), 1),
-                }
-            )
-        comp_fig.update_layout(
-            height=500, template="plotly_white",
-            xaxis_title="시간대", yaxis_title="혼잡도(%)",
-            hovermode="x unified", margin=dict(t=20, l=10, r=10, b=10),
-        )
-        st.plotly_chart(comp_fig, use_container_width=True)
-        st.dataframe(
-            pd.DataFrame(rows_for_table).sort_values("최고 혼잡도(%)", ascending=False),
-            use_container_width=True, hide_index=True,
-        )
+        station = st.text_input("역명 직접 입력", value="강남")
+        if rid_err:
+            st.error(f"승하차 API: {rid_err}")
 
-# ------------------------------------------------------------------
-# TAB 3. 전체 랭킹 & 히트맵
-# ------------------------------------------------------------------
-with tab3:
-    st.subheader(f"{daytype} 기준 · 전체 역 혼잡도 랭킹")
+    with st.expander("🔑 API 키 설정 상태"):
+        labels = {
+            "riders": "승하차 (RIDERS_API_KEY)",
+            "transfer": "환승 (TRANSFER_API_KEY)",
+            "building": "건축 (BUILDING_API_KEY)",
+            "busy": "혼잡도 (BUSY_API_KEY)",
+            "elevator": "승강기 (ELEVATOR_API_KEY)",
+        }
+        for k, label in labels.items():
+            st.write(("✅ " if keys[k] else "❌ ") + label)
+        st.caption("보안을 위해 키 값 자체는 표시되지 않습니다.")
 
-    base = df[df["요일구분"] == daytype].copy()
-    if line_sel != "전체":
-        base = base[base["호선"] == line_sel]
+# ─────────────────────────────────────────────
+# 메인
+# ─────────────────────────────────────────────
+st.title(f"📊 {station} 역 종합 현황")
+st.caption(f"기준일: {base_date.strftime('%Y-%m-%d')} · 출처: 서울열린데이터광장 / 공공데이터포털")
 
-    base["최고혼잡도"] = base[TIME_COLS].astype(float).max(axis=1)
-    base["최고혼잡시간대"] = base[TIME_COLS].astype(float).idxmax(axis=1).map(
-        lambda c: time_label(c)
-    )
-    base["평균혼잡도"] = base[TIME_COLS].astype(float).mean(axis=1)
+sel = (rid_df[rid_df["역명"].apply(lambda x: station_match(x, station))]
+       if not rid_df.empty else pd.DataFrame())
 
-    top_n = st.slider("표시할 역 개수", 5, 50, 15)
-    ranked = base.sort_values("최고혼잡도", ascending=False).head(top_n)
+trans_df, trans_err = load_transfer(keys["transfer"])
+trans_sel = filter_by_station(trans_df, station)
+trans_total = None
+if not trans_sel.empty:
+    nc = numeric_cols(trans_sel)
+    if nc:
+        trans_total = int(to_num(trans_sel[nc].stack()).sum())
 
-    rank_fig = px.bar(
-        ranked,
-        x="최고혼잡도",
-        y=ranked["호선"] + " " + ranked["출발역"] + "(" + ranked["상하구분"] + ")",
-        color="최고혼잡도",
-        color_continuous_scale=["#3B82F6", "#22C55E", "#EAB308", "#F97316", "#EF4444"],
-        orientation="h",
-        hover_data={"최고혼잡시간대": True},
-        labels={"y": "역", "최고혼잡도": "최고 혼잡도(%)"},
-    )
-    rank_fig.update_layout(
-        height=max(400, top_n * 28), template="plotly_white",
-        yaxis=dict(autorange="reversed"), margin=dict(t=20, l=10, r=10, b=10),
-    )
-    st.plotly_chart(rank_fig, use_container_width=True)
+k1, k2, k3, k4 = st.columns(4)
+k1.metric("승차 인원", f"{int(sel['승차'].sum()):,}명" if not sel.empty else "―")
+k2.metric("하차 인원", f"{int(sel['하차'].sum()):,}명" if not sel.empty else "―")
+k3.metric("총 이용객", f"{int(sel['합계'].sum()):,}명" if not sel.empty else "―")
+k4.metric("환승 인원(일)", f"{trans_total:,}명" if trans_total else "데이터 없음")
 
-    st.markdown("#### 노선 × 시간대 평균 혼잡도 히트맵")
-    heat = (
-        df[df["요일구분"] == daytype]
-        .groupby("호선")[TIME_COLS]
-        .mean()
-        .reindex(ALL_LINES)
-    )
-    heat_fig = px.imshow(
-        heat.values,
-        x=TIME_LABELS,
-        y=heat.index,
-        color_continuous_scale=["#3B82F6", "#22C55E", "#EAB308", "#F97316", "#EF4444"],
-        aspect="auto",
-        labels=dict(color="평균 혼잡도(%)"),
-    )
-    heat_fig.update_layout(height=380, margin=dict(t=20, l=10, r=10, b=10))
-    st.plotly_chart(heat_fig, use_container_width=True)
+st.divider()
 
-# ------------------------------------------------------------------
-# TAB 4. 인사이트 요약 + 추가 분석 추천
-# ------------------------------------------------------------------
-with tab4:
-    st.subheader("자동 인사이트 요약")
+tab_ride, tab_trans, tab_busy, tab_bld, tab_elev = st.tabs(
+    ["🚏 승하차 분석", "🔄 환승 인원", "📈 혼잡도", "🏗️ 역사 건축 현황", "♿ 승강기·교통약자 시설"]
+)
 
-    weekday_avg = df[df["요일구분"] == "평일"][TIME_COLS].astype(float).mean().mean()
-    weekend_avg = (
-        df[df["요일구분"].isin(["토요일", "일요일"])][TIME_COLS].astype(float).mean().mean()
-    )
-    busiest_line = (
-        df[df["요일구분"] == "평일"].groupby("호선")[TIME_COLS].mean().mean(axis=1).idxmax()
-    )
-    busiest_row = df.loc[df[TIME_COLS].astype(float).max(axis=1).idxmax()]
-    busiest_val = busiest_row[TIME_COLS].astype(float).max()
-    busiest_time = time_label(busiest_row[TIME_COLS].astype(float).idxmax())
+# ── 탭1: 승하차 ──
+with tab_ride:
+    if rid_df.empty:
+        st.warning(rid_err or "해당 날짜의 승하차 데이터가 없습니다. 다른 날짜를 선택해 보세요.")
+    else:
+        c1, c2 = st.columns(2)
+        with c1:
+            st.subheader("호선별 승하차 (선택 역)")
+            if sel.empty:
+                st.info("선택한 역의 승하차 데이터가 없습니다.")
+            else:
+                m = sel.melt(id_vars=["호선"], value_vars=["승차", "하차"],
+                             var_name="구분", value_name="인원")
+                fig = px.bar(m, x="호선", y="인원", color="구분", barmode="group",
+                             template=PLOTLY_TEMPLATE,
+                             color_discrete_map={"승차": "#1C83E1", "하차": "#FF6B6B"})
+                fig.update_layout(height=360, margin=dict(t=20, b=10),
+                                  legend=dict(orientation="h", y=1.1))
+                st.plotly_chart(fig, use_container_width=True)
+        with c2:
+            st.subheader(f"최근 {TREND_DAYS}일 이용 추이")
+            with st.spinner("추이 데이터 수집 중..."):
+                trend = load_trend(keys["riders"], base_date, station)
+            if trend.empty:
+                st.info("추이 데이터를 불러올 수 없습니다.")
+            else:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(x=trend["날짜"], y=trend["승차"], name="승차",
+                                         mode="lines+markers",
+                                         line=dict(color="#1C83E1", width=3)))
+                fig.add_trace(go.Scatter(x=trend["날짜"], y=trend["하차"], name="하차",
+                                         mode="lines+markers",
+                                         line=dict(color="#FF6B6B", width=3)))
+                fig.update_layout(template=PLOTLY_TEMPLATE, height=360,
+                                  margin=dict(t=20, b=10),
+                                  legend=dict(orientation="h", y=1.1))
+                st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown(
-        f"""
-- **평일 평균 혼잡도**: {weekday_avg:.1f}%  vs **주말 평균 혼잡도**: {weekend_avg:.1f}%
-  (평일이 주말보다 약 {weekday_avg - weekend_avg:.1f}%p 더 혼잡)
-- **평일 기준 가장 혼잡한 노선**: {busiest_line}
-- **전체 데이터 중 최고 혼잡 기록**: {busiest_row['호선']} {busiest_row['출발역']}역
-  ({busiest_row['상하구분']}, {busiest_row['요일구분']}) — **{busiest_time}에 {busiest_val:.1f}%**
-- 출근 피크는 07:30~08:30, 퇴근 피크는 18:00~18:30 구간에 집중되는 경향이 관찰됨
-        """
-    )
+        st.subheader("전체 역 이용객 순위 (Top 20)")
+        top = (rid_df.groupby("역명", as_index=False)["합계"].sum()
+               .sort_values("합계", ascending=False).head(20))
+        top["선택"] = top["역명"].apply(
+            lambda x: "선택 역" if station_match(x, station) else "기타")
+        fig = px.bar(top, x="합계", y="역명", orientation="h", color="선택",
+                     template=PLOTLY_TEMPLATE,
+                     labels={"합계": "총 이용객(명)"},
+                     color_discrete_map={"선택 역": "#E6186C", "기타": "#B0C4DE"})
+        fig.update_layout(height=560, yaxis=dict(autorange="reversed"),
+                          margin=dict(t=20, b=10), showlegend=False)
+        st.plotly_chart(fig, use_container_width=True)
 
-    st.markdown("---")
-    st.subheader("💡 이 데이터로 더 해볼 수 있는 분석 추천")
-    st.markdown(
-        """
-1. **시차 출퇴근 효과 분석** — 30분 단위 데이터를 활용해 각 역의 피크가 몇 분 앞뒤로
-   이동하면 혼잡도가 얼마나 낮아지는지 시뮬레이션 (시차출퇴근제 효과 검증)
-2. **환승역 vs 비환승역 비교** — 역번호·역명을 기준으로 환승역 태그를 추가해
-   환승역이 실제로 더 혼잡한지, 어느 시간대에 특히 그런지 통계 검정
-3. **상선/하선(또는 내선/외선) 불균형 분석** — 같은 역이라도 방향별 혼잡도 격차가 큰 역을
-   찾아 배차 간격 조정이 필요한 구간 식별
-4. **노선별 군집분석(clustering)** — 42개 시간대 값을 특징벡터로 K-means/계층적 군집화하여
-   "출퇴근형", "관광/상업형", "심야형" 등 역 유형 자동 분류
-5. **요일 간 차이의 통계적 유의성 검정** — 평일 vs 토요일 vs 일요일 혼잡도 차이를
-   ANOVA/Kruskal-Wallis로 검정해 요일별 배차 전략 근거 마련
-6. **혼잡도-사고/지연 상관 분석(외부 데이터 결합)** — 지연 정보나 민원 데이터와 조인해
-   혼잡도와 운행 장애 간 상관관계 탐색
-7. **예측 모델링** — 시계열(요일·시간대) 패턴을 학습해 특정 역의 향후 혼잡도를 예측하고
-   혼잡 알림 서비스에 활용
-        """
-    )
+# ── 탭2: 환승 ──
+with tab_trans:
+    if trans_err:
+        st.warning(f"환승 API: {trans_err}")
+    elif trans_df.empty:
+        st.info("환승 인원 데이터가 없습니다.")
+    else:
+        if trans_sel.empty:
+            st.info(f"'{station}'은(는) 환승 인원 데이터에 없습니다. (환승역이 아닐 수 있습니다)")
+        else:
+            st.subheader("선택 역 환승 인원")
+            nc = numeric_cols(trans_sel)
+            if nc:
+                melted = trans_sel.melt(value_vars=nc, var_name="항목", value_name="인원")
+                melted["인원"] = to_num(melted["인원"])
+                agg = melted.groupby("항목", as_index=False)["인원"].sum()
+                fig = px.bar(agg, x="항목", y="인원", color="항목",
+                             template=PLOTLY_TEMPLATE,
+                             color_discrete_sequence=px.colors.qualitative.Set2)
+                fig.update_layout(height=380, margin=dict(t=20, b=10), showlegend=False)
+                st.plotly_chart(fig, use_container_width=True)
+            st.dataframe(trans_sel, use_container_width=True, hide_index=True)
 
-st.markdown("---")
-st.caption("Made with Streamlit + Plotly · 데이터 출처: 서울교통공사")
+        c_stn = find_col(trans_df.columns, STATION_COL_KWS)
+        nc_all = numeric_cols(trans_df)
+        if c_stn and nc_all:
+            st.subheader("환승 인원 상위 15개 역")
+            tmp = trans_df.copy()
+            tmp["_합계"] = sum(to_num(tmp[c]).fillna(0) for c in nc_all)
+            rank = (tmp.groupby(c_stn, as_index=False)["_합계"].sum()
+                    .sort_values("_합계", ascending=False).head(15))
+            rank["선택"] = rank[c_stn].apply(
+                lambda x: "선택 역" if station_match(x, station) else "기타")
+            fig = px.bar(rank, x="_합계", y=c_stn, orientation="h", color="선택",
+                         template=PLOTLY_TEMPLATE,
+                         labels={"_합계": "환승 인원(명)", c_stn: "역명"},
+                         color_discrete_map={"선택 역": "#E6186C", "기타": "#B0C4DE"})
+            fig.update_layout(height=480, yaxis=dict(autorange="reversed"),
+                              margin=dict(t=20, b=10), showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+
+# ── 탭3: 혼잡도 ──
+with tab_busy:
+    with st.spinner("혼잡도 데이터 로딩 중..."):
+        busy_df, busy_err = load_congestion(keys["busy"], station)
+    if busy_err:
+        st.warning(f"혼잡도 API: {busy_err}")
+    elif busy_df.empty:
+        st.info("혼잡도 데이터가 없습니다.")
+    else:
+        busy_sel = filter_by_station(busy_df, station)
+        target = busy_sel if not busy_sel.empty else busy_df
+        if busy_sel.empty:
+            st.info("선택한 역의 혼잡도 행을 찾지 못해 조회된 전체 데이터를 표시합니다.")
+        time_cols = detect_time_cols(target)
+        if time_cols:
+            st.subheader("시간대별 혼잡도")
+            meta_cols = [c for c in target.columns if c not in time_cols]
+            label_col = find_col(meta_cols, ["UPDN", "방향", "DRCT", "요일", "DAY", "호선", "LINE"])
+            m = target.melt(id_vars=[label_col] if label_col else None,
+                            value_vars=time_cols, var_name="시간대", value_name="혼잡도")
+            m["혼잡도"] = to_num(m["혼잡도"])
+            m = m.dropna(subset=["혼잡도"])
+            fig = px.line(m, x="시간대", y="혼잡도",
+                          color=label_col if label_col else None,
+                          markers=True, template=PLOTLY_TEMPLATE)
+            fig.add_hline(y=100, line_dash="dash", line_color="red",
+                          annotation_text="혼잡 기준(100%)")
+            fig.update_layout(height=420, margin=dict(t=20, b=10),
+                              legend=dict(orientation="h", y=1.12))
+            st.plotly_chart(fig, use_container_width=True)
+        st.subheader("원본 데이터")
+        st.dataframe(target.head(300), use_container_width=True, hide_index=True)
+
+# ── 탭4: 역사 건축 현황 ──
+with tab_bld:
+    with st.spinner("건축 현황 데이터 로딩 중..."):
+        bld_df, bld_err = load_building(keys["building"])
+    if bld_err:
+        st.warning(f"건축 현황 API: {bld_err}")
+    elif bld_df.empty:
+        st.info("역사 건축 현황 데이터가 없습니다.")
+    else:
+        bld_sel = filter_by_station(bld_df, station)
+        if bld_sel.empty:
+            st.info(f"'{station}' 역의 건축 현황을 찾지 못했습니다. 아래에서 직접 검색해 보세요.")
+            q = st.text_input("건축 현황 내 검색", key="bld_search")
+            view = bld_df
+            if q:
+                mask = (bld_df.astype(str)
+                        .apply(lambda r: r.str.contains(q, na=False)).any(axis=1))
+                view = bld_df[mask]
+            st.dataframe(view.head(200), use_container_width=True, hide_index=True)
+        else:
+            st.subheader("선택 역 건축 정보")
+            row = bld_sel.iloc[0]
+            info_cols = st.columns(3)
+            shown = 0
+            for col_name, val in row.items():
+                if pd.isna(val) or str(val).strip() == "":
+                    continue
+                info_cols[shown % 3].markdown(f"**{col_name}**  \n{val}")
+                shown += 1
+            if len(bld_sel) > 1:
+                st.dataframe(bld_sel, use_container_width=True, hide_index=True)
+
+# ── 탭5: 승강기 ──
+with tab_elev:
+    with st.spinner("승강기 데이터 로딩 중..."):
+        elev_df, elev_err = load_elevator(keys["elevator"], station)
+    if elev_err:
+        st.warning(f"승강기 API: {elev_err}")
+    elif elev_df.empty:
+        st.info("승강기·교통약자 시설 데이터가 없습니다.")
+    else:
+        elev_sel = filter_by_station(elev_df, station)
+        if elev_sel.empty:
+            st.info(f"'{station}' 역의 승강기 데이터를 찾지 못했습니다.")
+        else:
+            c_kind = find_col(elev_sel.columns, ["ELVTR_SE", "KIND", "구분", "종류", "TYPE"])
+            c_use = find_col(elev_sel.columns, ["USE_YN", "사용", "가동", "STTS", "STATUS"])
+            c1, c2 = st.columns(2)
+            with c1:
+                st.subheader("시설 종류별 현황")
+                if c_kind:
+                    cnt = elev_sel[c_kind].value_counts().reset_index()
+                    cnt.columns = ["종류", "대수"]
+                    fig = px.pie(cnt, names="종류", values="대수", hole=0.45,
+                                 template=PLOTLY_TEMPLATE,
+                                 color_discrete_sequence=px.colors.qualitative.Pastel)
+                    fig.update_layout(height=340, margin=dict(t=20, b=10))
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.metric("총 시설 수", f"{len(elev_sel)}대")
+            with c2:
+                st.subheader("가동/사용 상태")
+                if c_use:
+                    cnt = elev_sel[c_use].value_counts().reset_index()
+                    cnt.columns = ["상태", "대수"]
+                    fig = px.bar(cnt, x="상태", y="대수", color="상태",
+                                 template=PLOTLY_TEMPLATE,
+                                 color_discrete_sequence=["#00A84D", "#FF6B6B", "#B0C4DE"])
+                    fig.update_layout(height=340, margin=dict(t=20, b=10),
+                                      showlegend=False)
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("상태 컬럼을 인식하지 못했습니다. 아래 표를 확인하세요.")
+            st.subheader("시설 목록")
+            st.dataframe(elev_sel, use_container_width=True, hide_index=True)
+
+st.divider()
+st.caption("ⓒ 서울교통공사 역 분석 대시보드 · 데이터: 서울열린데이터광장, 공공데이터포털 · API 키는 Secrets로 안전하게 관리됩니다.")
