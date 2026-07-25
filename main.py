@@ -819,7 +819,9 @@ MIN_DAY = (dt.datetime.strptime(_cmin, "%Y%m%d").date() if _cmin else API_MIN)
 st.markdown("## 🚇 서울교통공사 역 분석 대시보드")
 
 # ── 페이지 선택: 역 종합 현황 / 관심역 비교 분석 ──
-page = st.radio("페이지", ["📊 역 종합 현황", "⚖️ 관심역 비교 분석"],
+page = st.radio("페이지",
+                ["📊 역 종합 현황", "📈 혼잡도", "🗺️ 주변 역 지도",
+                 "🤖 AI 도우미", "⚖️ 관심역 비교 분석"],
                 horizontal=True, label_visibility="collapsed")
 
 # 역 목록 확보: API 스냅샷 → 실패하면 첨부 CSV에서
@@ -1046,6 +1048,227 @@ else:
     if rid_err:
         st.error(f"승하차 API: {rid_err}")
 
+# ═══ 페이지: 혼잡도 (탭 없이 바로 표시) ═══
+if page == "📈 혼잡도":
+    with st.spinner("혼잡도 데이터 로딩 중..."):
+        busy_df, busy_err = load_congestion(keys["busy"], station)
+    if busy_err:
+        st.warning(f"혼잡도 API: {busy_err}")
+    elif busy_df.empty:
+        st.info("혼잡도 데이터가 없습니다.")
+    else:
+        busy_sel = filter_by_station(busy_df, station)
+        target = busy_sel if not busy_sel.empty else busy_df
+        if busy_sel.empty:
+            st.info("선택한 역의 혼잡도 행을 찾지 못해 조회된 전체 데이터를 표시합니다.")
+        time_cols = detect_time_cols(target)
+        if time_cols:
+            st.subheader("시간대별 혼잡도")
+            # 요일(DOW_SE)·상하행(UP_DOWN_SE)을 합쳐 선(line) 구분 라벨로 사용
+            target = target.copy()
+            label_parts = [c for c in target.columns
+                           if find_col([c], ["DOW", "요일", "UP_DOWN", "UPDN", "방향", "DRCT"])]
+            if label_parts:
+                target["구분"] = target[label_parts].astype(str).agg(" · ".join, axis=1)
+                label_col = "구분"
+            else:
+                label_col = None
+            m = target.melt(id_vars=[label_col] if label_col else None,
+                            value_vars=time_cols, var_name="시간대", value_name="혼잡도")
+            m["혼잡도"] = to_num(m["혼잡도"])
+            m = m.dropna(subset=["혼잡도"])
+            m["시간대"] = m["시간대"].map(pretty_time_label)   # TIME0530 → 05:30
+            order = [pretty_time_label(c) for c in time_cols]
+            fig = px.line(m, x="시간대", y="혼잡도",
+                          color=label_col if label_col else None,
+                          markers=True, template=PLOTLY_TEMPLATE,
+                          category_orders={"시간대": order})
+            fig.add_hline(y=100, line_dash="dash", line_color="red",
+                          annotation_text="혼잡 기준(100%)")
+            fig.update_layout(height=420, margin=dict(t=20, b=10),
+                              legend=dict(orientation="h", y=1.12))
+            st.plotly_chart(fig, use_container_width=True)
+        st.subheader("원본 데이터")
+        st.dataframe(target.head(300), use_container_width=True, hide_index=True)
+    st.stop()   # 이 페이지는 여기서 끝
+
+
+# ═══ 페이지: 주변 역 지도 + 혼잡도 비교 ═══
+if page == "🗺️ 주변 역 지도":
+    with st.spinner("역 좌표 데이터 로딩 중..."):
+        master, m_err = load_station_master(keys["map"])
+    if m_err:
+        st.warning(f"역사 마스터 API: {m_err}")
+        st.caption("Secrets에 MAP_API_KEY(서울열린데이터광장 인증키)를 등록해 주세요.")
+    elif master.empty:
+        st.info("역 좌표 데이터가 없습니다.")
+    else:
+        sel_rows = master[master["역명"].apply(lambda x: station_match(x, station))]
+        if sel_rows.empty:
+            st.info(f"'{station}' 역의 좌표를 찾지 못했습니다.")
+        else:
+            # 선택 역의 대표 좌표 (환승역은 호선별 좌표의 평균)
+            lat0, lon0 = float(sel_rows["위도"].mean()), float(sel_rows["경도"].mean())
+            radius = st.slider("주변 역 탐색 반경 (km)", 0.5, 3.0, 1.5, 0.5)
+
+            # 모든 역까지의 거리 계산 → 반경 안의 역만 추리기
+            near = master.copy()
+            near["거리(km)"] = near.apply(
+                lambda r: haversine_km(lat0, lon0, r["위도"], r["경도"]), axis=1)
+            near = near[near["거리(km)"] <= radius].sort_values("거리(km)")
+
+            # ── 지도: 호선별 색상 마커 + 역명 라벨 ──
+            st.subheader(f"🗺️ {station} 주변 {radius}km 역 지도")
+            fig = px.scatter_mapbox(
+                near, lat="위도", lon="경도", color="호선", text="역명",
+                hover_name="역명",
+                hover_data={"호선": True, "거리(km)": ":.2f", "위도": False, "경도": False},
+                color_discrete_map=LINE_COLORS, zoom=13.3, height=520)
+            fig.update_traces(marker=dict(size=13), textposition="top center",
+                              textfont=dict(size=11, color="#0F3D6E"))
+            # 선택한 역은 큰 별도 마커로 강조
+            fig.add_trace(go.Scattermapbox(
+                lat=[lat0], lon=[lon0], mode="markers",
+                marker=dict(size=22, color="#FF5C8A"), name=f"⭐ {station}"))
+            fig.update_layout(mapbox_style="open-street-map",
+                              margin=dict(t=0, b=0, l=0, r=0),
+                              legend=dict(orientation="h", y=-0.04))
+            st.plotly_chart(fig, use_container_width=True)
+
+            # ── 주변 역 목록 (호선 묶음 + 거리) ──
+            info = (near.groupby("역명")
+                    .agg(호선=("호선", lambda s: ", ".join(sorted(set(s)))),
+                         거리km=("거리(km)", "min"))
+                    .reset_index().sort_values("거리km"))
+            info["거리km"] = info["거리km"].round(2)
+            st.dataframe(info, use_container_width=True, hide_index=True)
+
+            # ── 주변 역 혼잡도 한눈에 비교 (히트맵) ──
+            st.subheader("🔥 주변 역 혼잡도 비교")
+            near_names = info["역명"].head(6).tolist()   # 가까운 순 최대 6곳
+            heat_rows, time_order = [], None
+            with st.spinner("주변 역 혼잡도 수집 중..."):
+                for nm in near_names:
+                    bdf, berr = load_congestion(keys["busy"], nm)
+                    if berr or bdf is None or bdf.empty:
+                        continue
+                    bsel = filter_by_station(bdf, nm)
+                    if bsel.empty:
+                        continue
+                    tcols = detect_time_cols(bsel)
+                    if not tcols:
+                        continue
+                    # 요일·상하행을 평균 내서 역별 시간대 혼잡도 한 줄로
+                    vals = bsel[tcols].apply(to_num).mean()
+                    labels = [pretty_time_label(c) for c in tcols]
+                    heat_rows.append(pd.Series(vals.values, index=labels, name=nm))
+                    time_order = labels
+            if heat_rows:
+                hm = pd.DataFrame(heat_rows)
+                hm = hm[[c for c in time_order if c in hm.columns]]
+                fig = px.imshow(hm, aspect="auto", color_continuous_scale="YlOrRd",
+                                labels=dict(x="시간대", y="역", color="혼잡도(%)"))
+                fig.update_layout(height=120 + 46 * len(hm), margin=dict(t=20, b=10))
+                st.plotly_chart(fig, use_container_width=True)
+                st.caption("색이 진할수록 혼잡 (요일·상하행 평균, 100% = 정원 기준 만석)")
+            else:
+                st.info("주변 역의 혼잡도 데이터를 불러오지 못했습니다. (BUSY_API_KEY 필요)")
+    st.stop()   # 이 페이지는 여기서 끝
+
+
+# ═══ 페이지: AI 도우미 (Upstage Solar API, 모델 solar-open2) ═══
+if page == "🤖 AI 도우미":
+    st.subheader("🤖 AI 분석 도우미")
+    st.caption("역 데이터에 대해 궁금한 점을 물어보세요. 이전 대화를 기억하며 이어서 답해요.")
+
+    # 1) Secrets에서 Solar API 키를 불러온다 (코드에 키를 직접 쓰지 않는다!)
+    solar_key = get_secret("SOLAR_API_KEY")
+
+    if OpenAI is None:
+        # openai 라이브러리가 설치되지 않은 경우
+        st.info("openai 라이브러리가 필요해요. 터미널에서 `pip install openai` 후 다시 실행해 주세요.")
+    elif not solar_key:
+        # 키가 등록되지 않은 경우
+        st.info("Secrets에 SOLAR_API_KEY를 등록하면 AI 도우미를 사용할 수 있어요.")
+    else:
+        # 2) 대화 기록을 세션(session_state)에 저장 → 새로고침 전까지 기억
+        if "chat_messages" not in st.session_state:
+            st.session_state.chat_messages = []   # [{"role": "user"/"assistant", "content": "..."}]
+
+        # 대화를 처음부터 다시 시작하고 싶을 때 누르는 버튼
+        if st.session_state.chat_messages and st.button("🗑️ 대화 지우기"):
+            st.session_state.chat_messages = []
+            st.rerun()
+
+        # 3) 지금까지의 대화를 말풍선으로 다시 그려준다
+        for msg in st.session_state.chat_messages:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+        # 4) 채팅 입력창 (화면 아래에 고정됨)
+        user_input = st.chat_input("예: 이 역은 몇 시에 제일 붐비나요?")
+
+        if user_input:
+            # (1) 사용자의 말을 기록하고 말풍선으로 표시
+            st.session_state.chat_messages.append({"role": "user", "content": user_input})
+            with st.chat_message("user"):
+                st.markdown(user_input)
+
+            # (2) AI에게 줄 성격(시스템 프롬프트) + 현재 화면 정보(참고용)
+            system_prompt = "너는 따뜻하고 친절한 데이터 분석 선생님이야. 반드시 순수 한국어로만 답해"
+            context = f"[참고 정보] 사용자가 현재 선택한 역: {station}"
+
+            # 시스템 프롬프트 → 참고 정보 → 지금까지의 대화 순서로 전달
+            messages = ([{"role": "system", "content": system_prompt},
+                         {"role": "system", "content": context}]
+                        + st.session_state.chat_messages)
+
+            # (3) Solar API를 호출하고, 답을 글자 단위로 실시간 표시(스트리밍)
+            answer = None
+            with st.chat_message("assistant"):
+                try:
+                    # openai 라이브러리로 Upstage Solar 서버에 접속
+                    client = OpenAI(api_key=solar_key,
+                                    base_url="https://api.upstage.ai/v1")
+                    common = dict(
+                        model="solar-open2",     # 모델 이름은 글자 그대로 사용
+                        messages=messages,
+                        stream=True,             # 스트리밍(실시간 출력) 켜기
+                    )
+                    try:
+                        # 추론(생각) 기능 끄기 → 답이 빨리 나온다
+                        stream = client.chat.completions.create(
+                            reasoning_effort="none", **common)
+                    except TypeError:
+                        # 구버전 openai 라이브러리 대비: extra_body로 전달
+                        stream = client.chat.completions.create(
+                            extra_body={"reasoning_effort": "none"}, **common)
+
+                    # 스트리밍 조각(chunk)에서 글자만 뽑아 흘려보내는 함수
+                    def token_stream():
+                        for chunk in stream:
+                            if chunk.choices:
+                                piece = chunk.choices[0].delta.content
+                                if piece:
+                                    yield piece
+
+                    # st.write_stream: 글자가 실시간으로 흘러나오듯 표시
+                    answer = st.write_stream(token_stream())
+                except Exception:
+                    # 실패해도 무서운 에러 화면 대신 친절한 한국어 안내만 보여준다
+                    st.warning(
+                        "죄송해요, 지금은 AI 답변을 받아오지 못했어요. 😥\n\n"
+                        "잠시 후 다시 시도해 주세요. 계속 안 되면 SOLAR_API_KEY가 "
+                        "올바른지, 인터넷 연결이 되어 있는지 확인해 주세요."
+                    )
+
+            # (4) AI의 답도 대화 기록에 저장 → 다음 질문에서 문맥을 기억
+            if answer:
+                st.session_state.chat_messages.append(
+                    {"role": "assistant", "content": answer})
+    st.stop()   # 이 페이지는 여기서 끝
+
+
 # ── 2) 조회 방식: 일별 / 월별 / 기간 설정 ──
 mode, date_list, period_label = select_period("main")
 
@@ -1090,9 +1313,8 @@ k4.metric("환승 인원(일)", f"{trans_total:,}명" if trans_total else "데�
 
 st.divider()
 
-tab_ride, tab_trans, tab_busy, tab_map, tab_bld, tab_elev, tab_ai = st.tabs(
-    ["🚏 승하차 분석", "🔄 환승 인원", "📈 혼잡도", "🗺️ 주변 역 지도",
-     "🏗️ 역사 건축 현황", "♿ 승강기·교통약자 시설", "🤖 AI 도우미"]
+tab_ride, tab_trans, tab_bld, tab_elev = st.tabs(
+    ["🚏 승하차 분석", "🔄 환승 인원", "🏗️ 역사 건축 현황", "♿ 승강기·교통약자 시설"]
 )
 
 # ── 탭1: 승하차 ──
@@ -1221,130 +1443,6 @@ with tab_trans:
                               margin=dict(t=20, b=10), showlegend=False)
             st.plotly_chart(fig, use_container_width=True)
 
-# ── 탭3: 혼잡도 ──
-with tab_busy:
-    with st.spinner("혼잡도 데이터 로딩 중..."):
-        busy_df, busy_err = load_congestion(keys["busy"], station)
-    if busy_err:
-        st.warning(f"혼잡도 API: {busy_err}")
-    elif busy_df.empty:
-        st.info("혼잡도 데이터가 없습니다.")
-    else:
-        busy_sel = filter_by_station(busy_df, station)
-        target = busy_sel if not busy_sel.empty else busy_df
-        if busy_sel.empty:
-            st.info("선택한 역의 혼잡도 행을 찾지 못해 조회된 전체 데이터를 표시합니다.")
-        time_cols = detect_time_cols(target)
-        if time_cols:
-            st.subheader("시간대별 혼잡도")
-            # 요일(DOW_SE)·상하행(UP_DOWN_SE)을 합쳐 선(line) 구분 라벨로 사용
-            target = target.copy()
-            label_parts = [c for c in target.columns
-                           if find_col([c], ["DOW", "요일", "UP_DOWN", "UPDN", "방향", "DRCT"])]
-            if label_parts:
-                target["구분"] = target[label_parts].astype(str).agg(" · ".join, axis=1)
-                label_col = "구분"
-            else:
-                label_col = None
-            m = target.melt(id_vars=[label_col] if label_col else None,
-                            value_vars=time_cols, var_name="시간대", value_name="혼잡도")
-            m["혼잡도"] = to_num(m["혼잡도"])
-            m = m.dropna(subset=["혼잡도"])
-            m["시간대"] = m["시간대"].map(pretty_time_label)   # TIME0530 → 05:30
-            order = [pretty_time_label(c) for c in time_cols]
-            fig = px.line(m, x="시간대", y="혼잡도",
-                          color=label_col if label_col else None,
-                          markers=True, template=PLOTLY_TEMPLATE,
-                          category_orders={"시간대": order})
-            fig.add_hline(y=100, line_dash="dash", line_color="red",
-                          annotation_text="혼잡 기준(100%)")
-            fig.update_layout(height=420, margin=dict(t=20, b=10),
-                              legend=dict(orientation="h", y=1.12))
-            st.plotly_chart(fig, use_container_width=True)
-        st.subheader("원본 데이터")
-        st.dataframe(target.head(300), use_container_width=True, hide_index=True)
-
-# ── 탭: 주변 역 지도 + 혼잡도 비교 ──
-with tab_map:
-    with st.spinner("역 좌표 데이터 로딩 중..."):
-        master, m_err = load_station_master(keys["map"])
-    if m_err:
-        st.warning(f"역사 마스터 API: {m_err}")
-        st.caption("Secrets에 MAP_API_KEY(서울열린데이터광장 인증키)를 등록해 주세요.")
-    elif master.empty:
-        st.info("역 좌표 데이터가 없습니다.")
-    else:
-        sel_rows = master[master["역명"].apply(lambda x: station_match(x, station))]
-        if sel_rows.empty:
-            st.info(f"'{station}' 역의 좌표를 찾지 못했습니다.")
-        else:
-            # 선택 역의 대표 좌표 (환승역은 호선별 좌표의 평균)
-            lat0, lon0 = float(sel_rows["위도"].mean()), float(sel_rows["경도"].mean())
-            radius = st.slider("주변 역 탐색 반경 (km)", 0.5, 3.0, 1.5, 0.5)
-
-            # 모든 역까지의 거리 계산 → 반경 안의 역만 추리기
-            near = master.copy()
-            near["거리(km)"] = near.apply(
-                lambda r: haversine_km(lat0, lon0, r["위도"], r["경도"]), axis=1)
-            near = near[near["거리(km)"] <= radius].sort_values("거리(km)")
-
-            # ── 지도: 호선별 색상 마커 + 역명 라벨 ──
-            st.subheader(f"🗺️ {station} 주변 {radius}km 역 지도")
-            fig = px.scatter_mapbox(
-                near, lat="위도", lon="경도", color="호선", text="역명",
-                hover_name="역명",
-                hover_data={"호선": True, "거리(km)": ":.2f", "위도": False, "경도": False},
-                color_discrete_map=LINE_COLORS, zoom=13.3, height=520)
-            fig.update_traces(marker=dict(size=13), textposition="top center",
-                              textfont=dict(size=11, color="#0F3D6E"))
-            # 선택한 역은 큰 별도 마커로 강조
-            fig.add_trace(go.Scattermapbox(
-                lat=[lat0], lon=[lon0], mode="markers",
-                marker=dict(size=22, color="#FF5C8A"), name=f"⭐ {station}"))
-            fig.update_layout(mapbox_style="open-street-map",
-                              margin=dict(t=0, b=0, l=0, r=0),
-                              legend=dict(orientation="h", y=-0.04))
-            st.plotly_chart(fig, use_container_width=True)
-
-            # ── 주변 역 목록 (호선 묶음 + 거리) ──
-            info = (near.groupby("역명")
-                    .agg(호선=("호선", lambda s: ", ".join(sorted(set(s)))),
-                         거리km=("거리(km)", "min"))
-                    .reset_index().sort_values("거리km"))
-            info["거리km"] = info["거리km"].round(2)
-            st.dataframe(info, use_container_width=True, hide_index=True)
-
-            # ── 주변 역 혼잡도 한눈에 비교 (히트맵) ──
-            st.subheader("🔥 주변 역 혼잡도 비교")
-            near_names = info["역명"].head(6).tolist()   # 가까운 순 최대 6곳
-            heat_rows, time_order = [], None
-            with st.spinner("주변 역 혼잡도 수집 중..."):
-                for nm in near_names:
-                    bdf, berr = load_congestion(keys["busy"], nm)
-                    if berr or bdf is None or bdf.empty:
-                        continue
-                    bsel = filter_by_station(bdf, nm)
-                    if bsel.empty:
-                        continue
-                    tcols = detect_time_cols(bsel)
-                    if not tcols:
-                        continue
-                    # 요일·상하행을 평균 내서 역별 시간대 혼잡도 한 줄로
-                    vals = bsel[tcols].apply(to_num).mean()
-                    labels = [pretty_time_label(c) for c in tcols]
-                    heat_rows.append(pd.Series(vals.values, index=labels, name=nm))
-                    time_order = labels
-            if heat_rows:
-                hm = pd.DataFrame(heat_rows)
-                hm = hm[[c for c in time_order if c in hm.columns]]
-                fig = px.imshow(hm, aspect="auto", color_continuous_scale="YlOrRd",
-                                labels=dict(x="시간대", y="역", color="혼잡도(%)"))
-                fig.update_layout(height=120 + 46 * len(hm), margin=dict(t=20, b=10))
-                st.plotly_chart(fig, use_container_width=True)
-                st.caption("색이 진할수록 혼잡 (요일·상하행 평균, 100% = 정원 기준 만석)")
-            else:
-                st.info("주변 역의 혼잡도 데이터를 불러오지 못했습니다. (BUSY_API_KEY 필요)")
-
 # ── 탭4: 역사 건축 현황 ──
 with tab_bld:
     with st.spinner("건축 현황 데이터 로딩 중..."):
@@ -1420,100 +1518,6 @@ with tab_elev:
                     st.info("상태 컬럼을 인식하지 못했습니다. 아래 표를 확인하세요.")
             st.subheader("시설 목록")
             st.dataframe(elev_sel, use_container_width=True, hide_index=True)
-
-# ── 탭6: AI 도우미 (Upstage Solar API, 모델 solar-open2) ──
-with tab_ai:
-    st.subheader("🤖 AI 분석 도우미")
-    st.caption("역 데이터에 대해 궁금한 점을 물어보세요. 이전 대화를 기억하며 이어서 답해요.")
-
-    # 1) Secrets에서 Solar API 키를 불러온다 (코드에 키를 직접 쓰지 않는다!)
-    solar_key = get_secret("SOLAR_API_KEY")
-
-    if OpenAI is None:
-        # openai 라이브러리가 설치되지 않은 경우
-        st.info("openai 라이브러리가 필요해요. 터미널에서 `pip install openai` 후 다시 실행해 주세요.")
-    elif not solar_key:
-        # 키가 등록되지 않은 경우
-        st.info("Secrets에 SOLAR_API_KEY를 등록하면 AI 도우미를 사용할 수 있어요.")
-    else:
-        # 2) 대화 기록을 세션(session_state)에 저장 → 새로고침 전까지 기억
-        if "chat_messages" not in st.session_state:
-            st.session_state.chat_messages = []   # [{"role": "user"/"assistant", "content": "..."}]
-
-        # 대화를 처음부터 다시 시작하고 싶을 때 누르는 버튼
-        if st.session_state.chat_messages and st.button("🗑️ 대화 지우기"):
-            st.session_state.chat_messages = []
-            st.rerun()
-
-        # 3) 지금까지의 대화를 말풍선으로 다시 그려준다
-        for msg in st.session_state.chat_messages:
-            with st.chat_message(msg["role"]):
-                st.markdown(msg["content"])
-
-        # 4) 채팅 입력창 (화면 아래에 고정됨)
-        user_input = st.chat_input("예: 이 역은 몇 시에 제일 붐비나요?")
-
-        if user_input:
-            # (1) 사용자의 말을 기록하고 말풍선으로 표시
-            st.session_state.chat_messages.append({"role": "user", "content": user_input})
-            with st.chat_message("user"):
-                st.markdown(user_input)
-
-            # (2) AI에게 줄 성격(시스템 프롬프트) + 현재 화면 정보(참고용)
-            system_prompt = "너는 따뜻하고 친절한 데이터 분석 선생님이야. 반드시 순수 한국어로만 답해"
-            context = f"[참고 정보] 사용자가 보고 있는 역: {station}, 기준일: {base_date.strftime('%Y-%m-%d')}"
-            if not sel.empty:
-                context += (f", 이날 승차 {int(sel['승차'].sum()):,}명 / "
-                            f"하차 {int(sel['하차'].sum()):,}명")
-
-            # 시스템 프롬프트 → 참고 정보 → 지금까지의 대화 순서로 전달
-            messages = ([{"role": "system", "content": system_prompt},
-                         {"role": "system", "content": context}]
-                        + st.session_state.chat_messages)
-
-            # (3) Solar API를 호출하고, 답을 글자 단위로 실시간 표시(스트리밍)
-            answer = None
-            with st.chat_message("assistant"):
-                try:
-                    # openai 라이브러리로 Upstage Solar 서버에 접속
-                    client = OpenAI(api_key=solar_key,
-                                    base_url="https://api.upstage.ai/v1")
-                    common = dict(
-                        model="solar-open2",     # 모델 이름은 글자 그대로 사용
-                        messages=messages,
-                        stream=True,             # 스트리밍(실시간 출력) 켜기
-                    )
-                    try:
-                        # 추론(생각) 기능 끄기 → 답이 빨리 나온다
-                        stream = client.chat.completions.create(
-                            reasoning_effort="none", **common)
-                    except TypeError:
-                        # 구버전 openai 라이브러리 대비: extra_body로 전달
-                        stream = client.chat.completions.create(
-                            extra_body={"reasoning_effort": "none"}, **common)
-
-                    # 스트리밍 조각(chunk)에서 글자만 뽑아 흘려보내는 함수
-                    def token_stream():
-                        for chunk in stream:
-                            if chunk.choices:
-                                piece = chunk.choices[0].delta.content
-                                if piece:
-                                    yield piece
-
-                    # st.write_stream: 글자가 실시간으로 흘러나오듯 표시
-                    answer = st.write_stream(token_stream())
-                except Exception:
-                    # 실패해도 무서운 에러 화면 대신 친절한 한국어 안내만 보여준다
-                    st.warning(
-                        "죄송해요, 지금은 AI 답변을 받아오지 못했어요. 😥\n\n"
-                        "잠시 후 다시 시도해 주세요. 계속 안 되면 SOLAR_API_KEY가 "
-                        "올바른지, 인터넷 연결이 되어 있는지 확인해 주세요."
-                    )
-
-            # (4) AI의 답도 대화 기록에 저장 → 다음 질문에서 문맥을 기억
-            if answer:
-                st.session_state.chat_messages.append(
-                    {"role": "assistant", "content": answer})
 
 st.divider()
 st.caption("ⓒ 서울교통공사 역 분석 대시보드 · 데이터: 서울열린데이터광장, 공공데이터포털 · AI: Upstage Solar · API 키는 Secrets로 안전하게 관리됩니다.")
