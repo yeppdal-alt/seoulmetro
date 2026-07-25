@@ -80,7 +80,71 @@ fig = px.bar(wk, x="요일", y="평균 이용객", color="구분",
 fig.update_layout(height=380, margin=dict(t=20, b=10), showlegend=False)
 show_chart(fig)
 
-# ── 3) 혼잡도 요일 요약 (평일/토/일) ──
+# ── 3) 미래 날짜 승차인원 예측 (2025년 통계 기반) ──
+st.subheader("📅 미래 날짜 승차인원 예측")
+future = st.date_input(
+    "예측할 미래 날짜를 골라주세요",
+    value=dt.date.today() + dt.timedelta(days=7),
+    min_value=dt.date.today(),
+    max_value=dt.date.today() + dt.timedelta(days=365),
+    key="future_day",
+)
+
+# 2025년 하루별 '승차' 합계 → 요일·월 정보 붙이기
+ride_daily = df.groupby("날짜", as_index=False)["승차"].sum()
+ride_daily["_dt"] = pd.to_datetime(ride_daily["날짜"], format="%Y%m%d", errors="coerce")
+ride_daily = ride_daily.dropna(subset=["_dt"])
+ride_daily["_요일"] = ride_daily["_dt"].dt.dayofweek   # 0=월 ... 6=일
+ride_daily["_월"] = ride_daily["_dt"].dt.month
+
+wd, mo = future.weekday(), future.month
+wd_name = WEEKDAYS[wd]
+same_wd = ride_daily[ride_daily["_요일"] == wd]                  # 같은 요일
+same_both = same_wd[same_wd["_월"] == mo]                        # 같은 월 + 같은 요일
+
+if same_wd.empty:
+    st.warning("예측에 쓸 같은 요일 데이터가 없습니다.")
+else:
+    year_avg = ride_daily["승차"].mean()
+    mo_rows = ride_daily[ride_daily["_월"] == mo]
+    mo_factor = (mo_rows["승차"].mean() / year_avg) if len(mo_rows) else 1.0
+
+    if len(same_both) >= 3:
+        # 같은 달의 같은 요일 표본이 충분하면 그 평균을 그대로 사용
+        pred = same_both["승차"].mean()
+        spread = same_both["승차"].std()
+        basis = f"2025년 {mo}월의 {wd_name}요일 {len(same_both)}일 평균"
+        sample_dates = set(same_both["날짜"])
+    else:
+        # 표본이 적으면: 같은 요일 연평균 × 그 달의 계절 보정계수
+        pred = same_wd["승차"].mean() * mo_factor
+        spread = same_wd["승차"].std()
+        basis = f"2025년 {wd_name}요일 평균 × {mo}월 계절 보정({mo_factor:.2f})"
+        sample_dates = set(same_wd["날짜"])
+
+    spread = 0 if pd.isna(spread) else spread
+    p1, p2, p3 = st.columns(3)
+    p1.metric(f"🔮 {future.strftime('%m월 %d일')} ({wd_name}) 예상 승차",
+              f"{pred:,.0f}명")
+    p2.metric("예상 범위 (±1σ)",
+              f"{max(pred - spread, 0):,.0f} ~ {pred + spread:,.0f}명")
+    p3.metric("예측 근거", basis, help="2025년 실제 승차 데이터 기반 통계 예측")
+
+    # 예상 시간대별 승차 패턴 (같은 요일의 시간대 평균)
+    hh = (df[df["날짜"].isin(sample_dates)]
+          .groupby(["날짜", "시간"], as_index=False)["승차"].sum()
+          .groupby("시간", as_index=False)["승차"].mean()
+          .sort_values("시간"))
+    if not hh.empty:
+        fig = px.bar(hh, x="시간", y="승차", template=PLOTLY_TEMPLATE,
+                     labels={"시간": "시간대(시)", "승차": "예상 승차(명)"},
+                     color_discrete_sequence=["#2F6BFF"])
+        fig.update_layout(height=340, margin=dict(t=20, b=10), showlegend=False)
+        show_chart(fig)
+    st.caption("⚠️ 2025년 같은 요일·같은 달의 실제 데이터를 바탕으로 한 통계적 추정치예요. "
+               "공휴일·행사·날씨 등 특수 상황은 반영되지 않습니다.")
+
+# ── 4) 혼잡도 요일 요약 (평일/토/일) ──
 busy_summary = ""
 busy_df, _busy_err = load_congestion(keys["busy"], station)
 if busy_df is not None and not busy_df.empty:
