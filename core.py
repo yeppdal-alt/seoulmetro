@@ -509,28 +509,81 @@ def find_csv_files():
     return files
 
 
+# 인코딩/구분자 후보 (순서대로 시도)
+_CSV_READ_OPTIONS = (
+    {"encoding": "utf-8"},
+    {"encoding": "cp949"},
+    {"encoding": "utf-8-sig"},
+    {"encoding": "euc-kr"},
+    {"encoding": "utf-16"},
+    {"encoding": "cp949", "sep": None, "engine": "python"},   # 구분자 자동 감지
+    {"encoding": "utf-8", "sep": None, "engine": "python"},
+)
+
+
+def _pick_date_col(cols):
+    """'수송일자'가 포함된 컬럼명을 찾는다 (BOM·공백이 섞여도 인식)."""
+    for c in cols:
+        if "수송일자" in str(c):
+            return c
+    return None
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_csv_raw():
     """2025년 CSV를 읽어 원본 그대로 반환 (없으면 None).
     - 폴더 안 CSV들을 순서대로 열어 '수송일자' 컬럼이 있는 파일을 채택
-    - 인코딩(utf-8/cp949 등)도 자동으로 맞춘다"""
+    - 인코딩·구분자를 자동으로 맞춘다"""
     for path in find_csv_files():
-        for enc in ("utf-8", "cp949", "utf-8-sig", "euc-kr"):
+        for kwargs in _CSV_READ_OPTIONS:
             try:
-                df = pd.read_csv(path, encoding=enc)
-            except (UnicodeDecodeError, UnicodeError):
-                continue          # 인코딩이 안 맞음 → 다음 인코딩 시도
+                df = pd.read_csv(path, **kwargs)
             except FileNotFoundError:
                 break             # 파일이 사라짐 → 다음 파일
             except Exception:
-                continue
-            if "수송일자" in df.columns:                  # 올바른 파일!
-                df = df.dropna(subset=["수송일자"])        # 끝의 빈 행 제거
-                df["수송일자"] = (df["수송일자"].astype(str)
-                                 .str.replace("-", "").str[:8])
-                return df
-            # 읽히긴 했지만 헤더가 깨졌거나 다른 CSV → 다음 인코딩/파일 시도
+                continue          # 인코딩/형식이 안 맞음 → 다음 옵션 시도
+            c_date = _pick_date_col(df.columns)
+            if c_date is None:
+                continue          # 헤더가 깨졌거나 다른 CSV → 다음 옵션 시도
+            if c_date != "수송일자":
+                df = df.rename(columns={c_date: "수송일자"})
+            df = df.dropna(subset=["수송일자"])            # 끝의 빈 행 제거
+            df["수송일자"] = (df["수송일자"].astype(str)
+                             .str.replace("-", "").str[:8])
+            return df
     return None
+
+
+def csv_diagnostic():
+    """CSV를 왜 못 읽는지 사람 눈으로 볼 수 있는 진단 메시지 목록을 만든다."""
+    msgs = []
+    for path in find_csv_files():
+        name = os.path.basename(path)
+        try:
+            with open(path, "rb") as fh:
+                head = fh.read(300)
+        except Exception:
+            msgs.append(f"{name}: 파일을 열 수 없습니다.")
+            continue
+        # Git LFS 포인터 파일 감지 (실제 데이터 대신 몇 줄짜리 텍스트가 올라간 경우)
+        if head.startswith(b"version https://git-lfs"):
+            msgs.append(f"{name}: ⚠️ Git LFS 포인터 파일입니다 — 실제 데이터가 아니에요. "
+                        "GitHub 웹의 'Add file → Upload files'로 원본을 직접 올리거나, "
+                        "압축본(.csv.xz)을 사용해 주세요.")
+            continue
+        size_mb = os.path.getsize(path) / 1_000_000
+        cols = None
+        for kwargs in _CSV_READ_OPTIONS:
+            try:
+                cols = list(pd.read_csv(path, nrows=2, **kwargs).columns)
+                break
+            except Exception:
+                continue
+        if cols is None:
+            msgs.append(f"{name} ({size_mb:.1f}MB): 어떤 인코딩으로도 읽을 수 없습니다.")
+        else:
+            msgs.append(f"{name} ({size_mb:.1f}MB): 읽힌 컬럼 앞부분 = {cols[:6]}")
+    return msgs
 
 
 @st.cache_data(show_spinner=False)
