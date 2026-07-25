@@ -74,7 +74,7 @@ else:
             comp = pd.DataFrame(rows)
             fig = px.bar(comp, x="역", y="인원", color="구분", barmode="group",
                          template=PLOTLY_TEMPLATE,
-                         color_discrete_map={"승차": "#2F6BFF", "하차": "#0F172A"})
+                         color_discrete_map={"승차": "#2F6BFF", "하차": "#93C5FD"})
             fig.update_layout(height=380, margin=dict(t=20, b=10),
                               legend=dict(orientation="h", y=1.1))
             show_chart(fig)
